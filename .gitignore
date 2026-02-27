@@ -3,9 +3,9 @@
 .env.local
 *.env
 
-# Project artifacts (pipeline outputs and raw data)
-data/
-outputs/
+# Project artifacts (pipeline outputs and raw data; folders kept via .gitkeep)
+data/**/*.parquet
+outputs/**/*.parquet
 regime.duckdb
 
 # Python
@@ -23,7 +23,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
