@@ -16,6 +16,7 @@ import duckdb
 import pandas as pd
 
 from config import (
+    apply_duckdb_limits,
     DATA_DIR,
     DATE_END,
     DATE_START,
@@ -36,6 +37,7 @@ FRED_SERIES_STEMS = [
 def main() -> None:
     MACRO_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     if not FRED_DIR.exists():
         FRED_DIR.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 import duckdb
 
 from config import (
+    apply_duckdb_limits,
     DATA_DIR,
     DATE_END,
     DATE_START,
@@ -111,6 +112,7 @@ def _write_empty_fundamental_pit() -> None:
 def main() -> None:
     FUNDAMENTAL_PIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     def _path_sql(p: Path) -> str:
         return repr(str(p.resolve()))

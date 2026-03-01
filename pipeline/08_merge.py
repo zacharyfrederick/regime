@@ -16,6 +16,7 @@ import duckdb
 from tqdm import tqdm
 
 from config import (
+    apply_duckdb_limits,
     DAILY_UNIVERSE_PATH,
     FORWARD_LABELS_PATH,
     FUNDAMENTAL_PIT_PATH,
@@ -34,6 +35,7 @@ def main() -> None:
     log.info("Starting 07_merge")
     MASTER_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     if not DAILY_UNIVERSE_PATH.exists():
         log.warning("Universe not found; run 01_universe.py first. Writing empty master.")

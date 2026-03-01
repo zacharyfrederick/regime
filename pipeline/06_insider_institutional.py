@@ -20,6 +20,7 @@ import pyarrow.parquet as pq
 import duckdb
 
 from config import (
+    apply_duckdb_limits,
     DATA_DIR,
     DATE_START,
     DATE_END,
@@ -67,6 +68,7 @@ def _write_empty() -> None:
 def main() -> None:
     INSIDER_INSTITUTIONAL_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     def _path_sql(p: Path) -> str:
         return repr(str(p.resolve()))

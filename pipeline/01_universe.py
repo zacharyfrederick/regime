@@ -17,6 +17,7 @@ import duckdb
 from tqdm import tqdm
 
 from config import (
+    apply_duckdb_limits,
     DATA_DIR,
     DATE_END,
     DATE_START,
@@ -67,6 +68,7 @@ def main() -> None:
     DAILY_UNIVERSE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     # Register parquet (DuckDB does not allow prepared params in read_parquet; use literal path)
     def _path_sql(p: Path) -> str:

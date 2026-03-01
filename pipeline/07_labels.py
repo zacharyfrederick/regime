@@ -25,17 +25,21 @@ if str(ROOT) not in sys.path:
 import duckdb
 
 from config import (
+    apply_duckdb_limits,
     DATA_DIR,
     DATE_END,
     DATE_START,
     DAILY_UNIVERSE_PATH,
     FORWARD_LABELS_PATH,
+    LABELS_DIR,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
 HORIZONS_TD = (21, 63, 126, 252)
+# Temp parquet stem for per-horizon files (under LABELS_DIR); cleaned up after final write.
+_LABELS_TEMP_STEM = "_labels_"
 
 
 def _parquet(name: str) -> Path:
@@ -47,6 +51,7 @@ def main() -> None:
     log.info("Building forward labels (09_labels)")
     FORWARD_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     def _path_sql(p: Path) -> str:
         return repr(str(p.resolve()))
@@ -160,13 +165,14 @@ def main() -> None:
         """
     )
 
-    # Build labels per horizon then join
+    # Build labels per horizon: write each to a temp parquet, then join from parquets to limit peak memory.
     n_grid = con.execute("SELECT COUNT(*) FROM grid").fetchone()[0]
     if n_grid == 0:
         _write_empty_labels(con)
         con.close()
         return
 
+    temp_paths: list[Path] = []
     for N in HORIZONS_TD:
         # For each (ticker, date) in grid: get cur price and rn; get N-th forward row or terminal row
         con.execute(f"""
@@ -257,29 +263,52 @@ def main() -> None:
         LEFT JOIN labels_N l ON l.ticker = g.ticker AND l.date = g.date
         """)
 
-    # Single wide table: one row per (ticker, date) from grid
-    con.execute(
-        """
-        CREATE OR REPLACE VIEW forward_labels AS
-        SELECT
-            g.ticker,
-            g.date,
-            l21.fwd_ret_21td, l21.fwd_holding_days_21td, l21.fwd_delisted_21td, l21.fwd_delist_type_21td,
-            l63.fwd_ret_63td, l63.fwd_holding_days_63td, l63.fwd_delisted_63td, l63.fwd_delist_type_63td,
-            l126.fwd_ret_126td, l126.fwd_holding_days_126td, l126.fwd_delisted_126td, l126.fwd_delist_type_126td,
-            l252.fwd_ret_252td, l252.fwd_holding_days_252td, l252.fwd_delisted_252td, l252.fwd_delist_type_252td
-        FROM grid g
-        LEFT JOIN labels_21td l21 ON l21.ticker = g.ticker AND l21.date = g.date
-        LEFT JOIN labels_63td l63 ON l63.ticker = g.ticker AND l63.date = g.date
-        LEFT JOIN labels_126td l126 ON l126.ticker = g.ticker AND l126.date = g.date
-        LEFT JOIN labels_252td l252 ON l252.ticker = g.ticker AND l252.date = g.date
-        """
-    )
+        temp_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}{N}td.parquet"
+        temp_paths.append(temp_path)
+        con.execute(f"COPY (SELECT * FROM labels_{N}td) TO {_path_sql(temp_path)} (FORMAT PARQUET)")
+        log.info("Wrote %s", temp_path.name)
 
-    con.execute(f"COPY (SELECT * FROM forward_labels) TO {_path_sql(FORWARD_LABELS_PATH)} (FORMAT PARQUET)")
-    n_out = con.execute("SELECT COUNT(*) FROM forward_labels").fetchone()[0]
-    log.info("Wrote %s: %d rows", FORWARD_LABELS_PATH, n_out)
-    con.close()
+        # Drop per-horizon views so the engine does not retain them for the next N
+        con.execute(f"DROP VIEW IF EXISTS labels_{N}td")
+        con.execute("DROP VIEW IF EXISTS labels_N")
+        con.execute("DROP VIEW IF EXISTS last_day")
+        con.execute("DROP VIEW IF EXISTS terminal_row")
+        con.execute("DROP VIEW IF EXISTS fwd_N")
+        con.execute("DROP VIEW IF EXISTS grid_cur")
+
+    # Final join: grid + four temp parquets -> one wide table
+    l21_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}21td.parquet"
+    l63_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}63td.parquet"
+    l126_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}126td.parquet"
+    l252_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}252td.parquet"
+    try:
+        con.execute(
+            f"""
+            CREATE OR REPLACE VIEW forward_labels AS
+            SELECT
+                g.ticker,
+                g.date,
+                l21.fwd_ret_21td, l21.fwd_holding_days_21td, l21.fwd_delisted_21td, l21.fwd_delist_type_21td,
+                l63.fwd_ret_63td, l63.fwd_holding_days_63td, l63.fwd_delisted_63td, l63.fwd_delist_type_63td,
+                l126.fwd_ret_126td, l126.fwd_holding_days_126td, l126.fwd_delisted_126td, l126.fwd_delist_type_126td,
+                l252.fwd_ret_252td, l252.fwd_holding_days_252td, l252.fwd_delisted_252td, l252.fwd_delist_type_252td
+            FROM grid g
+            LEFT JOIN read_parquet({_path_sql(l21_path)}) l21 ON l21.ticker = g.ticker AND l21.date = g.date
+            LEFT JOIN read_parquet({_path_sql(l63_path)}) l63 ON l63.ticker = g.ticker AND l63.date = g.date
+            LEFT JOIN read_parquet({_path_sql(l126_path)}) l126 ON l126.ticker = g.ticker AND l126.date = g.date
+            LEFT JOIN read_parquet({_path_sql(l252_path)}) l252 ON l252.ticker = g.ticker AND l252.date = g.date
+            """
+        )
+        con.execute(f"COPY (SELECT * FROM forward_labels) TO {_path_sql(FORWARD_LABELS_PATH)} (FORMAT PARQUET)")
+        n_out = con.execute("SELECT COUNT(*) FROM forward_labels").fetchone()[0]
+        log.info("Wrote %s: %d rows", FORWARD_LABELS_PATH, n_out)
+        # Cleanup temp parquets after successful write
+        for p in temp_paths:
+            if p.exists():
+                p.unlink()
+                log.debug("Removed temp %s", p.name)
+    finally:
+        con.close()
 
 
 def _write_empty_labels(con: duckdb.DuckDBPyConnection) -> None:

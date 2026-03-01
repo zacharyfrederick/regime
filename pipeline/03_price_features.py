@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 import duckdb
 
 from config import (
+    apply_duckdb_limits,
     DATA_DIR,
     DATE_END,
     DATE_START,
@@ -38,6 +39,7 @@ def main() -> None:
     log.info("Building price features (SEP -> returns, vol, 52w, ATR, MA cross, momentum skew)")
     PRICE_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     if not DAILY_UNIVERSE_PATH.exists():
         log.warning("Universe not found; run 01_universe.py first.")

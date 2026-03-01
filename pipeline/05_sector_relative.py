@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 import duckdb
 
 from config import (
+    apply_duckdb_limits,
     DATA_DIR,
     DAILY_UNIVERSE_PATH,
     FUNDAMENTAL_PIT_PATH,
@@ -34,6 +35,7 @@ def _parquet(name: str) -> Path:
 def main() -> None:
     SECTOR_RELATIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(":memory:")
+    apply_duckdb_limits(con)
 
     def _path_sql(p: Path) -> str:
         return repr(str(p.resolve()))

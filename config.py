@@ -53,6 +53,19 @@ SPY_TICKER = "SPY"
 VIX_FRED_CODE = "VIXCLS"  # or use ETF proxy from SFP if preferred
 
 # Debug: limit pipeline to a few tickers for fast runs (long-history names).
-DEBUG = True
+DEBUG = False
 DEBUG_TICKERS = None  # When None and DEBUG is True, use DEBUG_TICKERS_DEFAULT.
 DEBUG_TICKERS_DEFAULT = ("AAPL", "MSFT", "JPM", "XOM", "JNJ", "HTZ", "TWX", "MON", "TIF", "DNKN", "ETFC")
+
+# DuckDB: optional memory cap and temp dir for spill (reduces peak RAM in heavy pipeline steps).
+# Set to None to use DuckDB defaults.
+DUCKDB_MEMORY_LIMIT = "8GB"
+DUCKDB_TEMP_DIR = None  # e.g. "/tmp/duckdb" or None
+
+
+def apply_duckdb_limits(con) -> None:
+    """Apply config memory_limit and temp_directory to a DuckDB connection."""
+    if DUCKDB_MEMORY_LIMIT is not None:
+        con.execute(f"SET memory_limit = '{DUCKDB_MEMORY_LIMIT}'")
+    if DUCKDB_TEMP_DIR is not None:
+        con.execute(f"SET temp_directory = '{DUCKDB_TEMP_DIR}'")
