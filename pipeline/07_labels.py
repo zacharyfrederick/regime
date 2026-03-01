@@ -37,7 +37,7 @@ from config import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-HORIZONS_TD = (21, 63, 126, 252)
+HORIZONS_TD = (5, 10, 21, 63, 126, 252)
 # Temp parquet stem for per-horizon files (under LABELS_DIR); cleaned up after final write.
 _LABELS_TEMP_STEM = "_labels_"
 
@@ -298,7 +298,9 @@ def main() -> None:
         con.execute("DROP VIEW IF EXISTS fwd_N")
         con.execute("DROP VIEW IF EXISTS grid_cur")
 
-    # Final join: grid + four temp parquets -> one wide table
+    # Final join: grid + six temp parquets -> one wide table
+    l5_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}5td.parquet"
+    l10_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}10td.parquet"
     l21_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}21td.parquet"
     l63_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}63td.parquet"
     l126_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}126td.parquet"
@@ -310,11 +312,15 @@ def main() -> None:
             SELECT
                 g.ticker,
                 g.date,
+                l5.fwd_ret_5td, l5.fwd_holding_days_5td, l5.fwd_delisted_5td, l5.fwd_delist_type_5td,
+                l10.fwd_ret_10td, l10.fwd_holding_days_10td, l10.fwd_delisted_10td, l10.fwd_delist_type_10td,
                 l21.fwd_ret_21td, l21.fwd_holding_days_21td, l21.fwd_delisted_21td, l21.fwd_delist_type_21td,
                 l63.fwd_ret_63td, l63.fwd_holding_days_63td, l63.fwd_delisted_63td, l63.fwd_delist_type_63td,
                 l126.fwd_ret_126td, l126.fwd_holding_days_126td, l126.fwd_delisted_126td, l126.fwd_delist_type_126td,
                 l252.fwd_ret_252td, l252.fwd_holding_days_252td, l252.fwd_delisted_252td, l252.fwd_delist_type_252td
             FROM grid g
+            LEFT JOIN read_parquet({_path_sql(l5_path)}) l5 ON l5.ticker = g.ticker AND l5.date = g.date
+            LEFT JOIN read_parquet({_path_sql(l10_path)}) l10 ON l10.ticker = g.ticker AND l10.date = g.date
             LEFT JOIN read_parquet({_path_sql(l21_path)}) l21 ON l21.ticker = g.ticker AND l21.date = g.date
             LEFT JOIN read_parquet({_path_sql(l63_path)}) l63 ON l63.ticker = g.ticker AND l63.date = g.date
             LEFT JOIN read_parquet({_path_sql(l126_path)}) l126 ON l126.ticker = g.ticker AND l126.date = g.date
@@ -340,6 +346,14 @@ def _write_empty_labels(con: duckdb.DuckDBPyConnection) -> None:
     schema = pa.schema([
         ("ticker", pa.string()),
         ("date", pa.date32()),
+        ("fwd_ret_5td", pa.float64()),
+        ("fwd_holding_days_5td", pa.int64()),
+        ("fwd_delisted_5td", pa.bool_()),
+        ("fwd_delist_type_5td", pa.string()),
+        ("fwd_ret_10td", pa.float64()),
+        ("fwd_holding_days_10td", pa.int64()),
+        ("fwd_delisted_10td", pa.bool_()),
+        ("fwd_delist_type_10td", pa.string()),
         ("fwd_ret_21td", pa.float64()),
         ("fwd_holding_days_21td", pa.int64()),
         ("fwd_delisted_21td", pa.bool_()),

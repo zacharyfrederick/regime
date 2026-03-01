@@ -43,6 +43,8 @@ def main() -> None:
         schema = pa.schema([
             ("ticker", pa.string()), ("date", pa.date32()), ("sector", pa.string()), ("famaindustry", pa.string()),
             ("days_listed", pa.int32()), ("scalemarketcap", pa.float64()), ("marketcap_daily", pa.int64()), ("fwd_spinoff_60d", pa.bool_()),
+            ("fwd_ret_5td", pa.float64()), ("fwd_holding_days_5td", pa.int64()), ("fwd_delisted_5td", pa.bool_()), ("fwd_delist_type_5td", pa.string()),
+            ("fwd_ret_10td", pa.float64()), ("fwd_holding_days_10td", pa.int64()), ("fwd_delisted_10td", pa.bool_()), ("fwd_delist_type_10td", pa.string()),
             ("fwd_ret_21td", pa.float64()), ("fwd_holding_days_21td", pa.int64()), ("fwd_delisted_21td", pa.bool_()), ("fwd_delist_type_21td", pa.string()),
             ("fwd_ret_63td", pa.float64()), ("fwd_holding_days_63td", pa.int64()), ("fwd_delisted_63td", pa.bool_()), ("fwd_delist_type_63td", pa.string()),
             ("fwd_ret_126td", pa.float64()), ("fwd_holding_days_126td", pa.int64()), ("fwd_delisted_126td", pa.bool_()), ("fwd_delist_type_126td", pa.string()),
@@ -164,6 +166,10 @@ def main() -> None:
     """
     _empty_forward_labels = """
         SELECT u.ticker, u.date,
+               CAST(NULL AS DOUBLE) AS fwd_ret_5td, CAST(NULL AS BIGINT) AS fwd_holding_days_5td,
+               CAST(NULL AS BOOLEAN) AS fwd_delisted_5td, CAST(NULL AS VARCHAR) AS fwd_delist_type_5td,
+               CAST(NULL AS DOUBLE) AS fwd_ret_10td, CAST(NULL AS BIGINT) AS fwd_holding_days_10td,
+               CAST(NULL AS BOOLEAN) AS fwd_delisted_10td, CAST(NULL AS VARCHAR) AS fwd_delist_type_10td,
                CAST(NULL AS DOUBLE) AS fwd_ret_21td, CAST(NULL AS BIGINT) AS fwd_holding_days_21td,
                CAST(NULL AS BOOLEAN) AS fwd_delisted_21td, CAST(NULL AS VARCHAR) AS fwd_delist_type_21td,
                CAST(NULL AS DOUBLE) AS fwd_ret_63td, CAST(NULL AS BIGINT) AS fwd_holding_days_63td,
@@ -219,6 +225,8 @@ def main() -> None:
             u.scalemarketcap,
             u.marketcap_daily,
             u.fwd_spinoff_60d,
+            l.fwd_ret_5td, l.fwd_holding_days_5td, l.fwd_delisted_5td, l.fwd_delist_type_5td,
+            l.fwd_ret_10td, l.fwd_holding_days_10td, l.fwd_delisted_10td, l.fwd_delist_type_10td,
             l.fwd_ret_21td, l.fwd_holding_days_21td, l.fwd_delisted_21td, l.fwd_delist_type_21td,
             l.fwd_ret_63td, l.fwd_holding_days_63td, l.fwd_delisted_63td, l.fwd_delist_type_63td,
             l.fwd_ret_126td, l.fwd_holding_days_126td, l.fwd_delisted_126td, l.fwd_delist_type_126td,
