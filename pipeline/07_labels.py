@@ -48,7 +48,7 @@ def _parquet(name: str) -> Path:
 
 
 def main() -> None:
-    log.info("Building forward labels (09_labels)")
+    log.info("Building forward labels (07_labels)")
     FORWARD_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
     apply_duckdb_limits(con)
@@ -145,10 +145,10 @@ def main() -> None:
         """
     )
 
-    # SEP with trading-day rank per ticker (for forward lookups)
+    # SEP with trading-day rank per ticker (for forward lookups). Materialize as TABLE so ROW_NUMBER() runs once.
     con.execute(
         """
-        CREATE OR REPLACE VIEW sep_ranked AS
+        CREATE OR REPLACE TABLE sep_ranked AS
         SELECT ticker, date, closeadj,
                ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date) AS rn
         FROM sep
@@ -217,6 +217,7 @@ def main() -> None:
         """)
 
         # Assemble horizon N: fwd_ret, fwd_holding_days, fwd_delisted, fwd_delist_type (exclude mergerfrom from flag)
+        # Tail (no forward data): NULLs — we don't know return/delist. Terminal with no action: fwd_delisted NULL.
         con.execute(f"""
         CREATE OR REPLACE VIEW labels_N AS
         SELECT
@@ -225,18 +226,18 @@ def main() -> None:
             CASE
                 WHEN g.price_n IS NOT NULL THEN (g.price_n / g.price_t) - 1.0
                 WHEN t.term_closeadj IS NOT NULL THEN (t.term_closeadj / g.price_t) - 1.0
-                ELSE 0.0
+                ELSE NULL
             END AS fwd_ret,
             CASE
                 WHEN g.price_n IS NOT NULL THEN {N}
                 WHEN t.term_rn IS NOT NULL THEN (t.term_rn - g.rn_t)::INTEGER
-                ELSE 0
+                ELSE NULL
             END AS fwd_holding_days,
             CASE
                 WHEN g.price_n IS NOT NULL THEN FALSE
-                WHEN t.term_closeadj IS NOT NULL THEN (COALESCE(e.delist_type, '') <> 'mergerfrom')
-                WHEN ld.ticker IS NOT NULL THEN (COALESCE(e2.delist_type, '') <> 'mergerfrom')
-                ELSE FALSE
+                WHEN t.term_closeadj IS NOT NULL THEN CASE WHEN e.delist_type IS NULL THEN NULL ELSE e.delist_type <> 'mergerfrom' END
+                WHEN ld.ticker IS NOT NULL THEN NULL
+                ELSE NULL
             END AS fwd_delisted,
             CASE
                 WHEN g.price_n IS NOT NULL THEN CAST(NULL AS VARCHAR)
