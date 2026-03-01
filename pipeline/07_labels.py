@@ -37,7 +37,13 @@ from config import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
-HORIZONS_TD = (5, 10, 21, 63, 126, 252)
+# Calendar-anchored horizons only (see docs/label_upgrade_roadmap.md)
+HORIZON_CONFIG = {
+    5: "rebalance_weekly",
+    21: "rebalance_monthly",
+    63: "rebalance_quarterly",
+    252: "rebalance_annual",
+}
 # Temp parquet stem for per-horizon files (under LABELS_DIR); cleaned up after final write.
 _LABELS_TEMP_STEM = "_labels_"
 
@@ -186,6 +192,64 @@ def main() -> None:
         """
     )
 
+    # Global trading calendar from distinct dates in SEP (for calendar-anchored periods and T-1 feature_date)
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE trading_calendar AS
+        SELECT
+            date,
+            ROW_NUMBER() OVER (ORDER BY date) AS td_index,
+            date_part('isoyear', date)::INTEGER AS iso_year,
+            date_part('week', date)::INTEGER AS iso_week,
+            date_part('year', date)::INTEGER AS year,
+            date_part('month', date)::INTEGER AS month,
+            date_part('quarter', date)::INTEGER AS quarter
+        FROM (SELECT DISTINCT date FROM sep_ranked) AS d
+        """
+    )
+    # Rebalance schedules: entry_date = first trading day of period, exit_date = last
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE rebalance_weekly AS
+        SELECT iso_year, iso_week,
+               MIN(date) AS entry_date,
+               MAX(date) AS exit_date
+        FROM trading_calendar
+        GROUP BY iso_year, iso_week
+        """
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE rebalance_monthly AS
+        SELECT year, month,
+               MIN(date) AS entry_date,
+               MAX(date) AS exit_date
+        FROM trading_calendar
+        GROUP BY year, month
+        """
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE rebalance_quarterly AS
+        SELECT year, quarter,
+               MIN(date) AS entry_date,
+               MAX(date) AS exit_date
+        FROM trading_calendar
+        GROUP BY year, quarter
+        """
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE rebalance_annual AS
+        SELECT year,
+               MIN(date) AS entry_date,
+               MAX(date) AS exit_date
+        FROM trading_calendar
+        GROUP BY year
+        """
+    )
+    log.info("Built trading_calendar and rebalance_weekly/monthly/quarterly/annual")
+
     # Build labels per horizon: write each to a temp parquet, then join from parquets to limit peak memory.
     n_grid = con.execute("SELECT COUNT(*) FROM grid").fetchone()[0]
     if n_grid == 0:
@@ -194,30 +258,36 @@ def main() -> None:
         return
 
     temp_paths: list[Path] = []
-    for N in HORIZONS_TD:
-        # For each (ticker, date) in grid: get cur price and rn; get N-th forward row or terminal row
+    for N, rebal_table in HORIZON_CONFIG.items():
+        # Only rebalance entry dates for this horizon; T-1 feature_date for feature join
         con.execute(f"""
         CREATE OR REPLACE VIEW grid_cur AS
         SELECT g.ticker, g.date,
                s.closeadj AS price_t,
-               s.rn AS rn_t
+               s.rn AS rn_t,
+               rb.entry_date,
+               rb.exit_date,
+               tc_prev.date AS feature_date
         FROM grid g
         INNER JOIN sep_ranked s ON s.ticker = g.ticker AND s.date = g.date
+        INNER JOIN {rebal_table} rb ON g.date = rb.entry_date
+        JOIN trading_calendar tc ON tc.date = g.date
+        JOIN trading_calendar tc_prev ON tc_prev.td_index = tc.td_index - 1
         """)
-        # Forward N-th trading day (may be null if terminated before N)
-        con.execute(f"""
+        # Exit price at calendar period end (not rn + N)
+        con.execute("""
         CREATE OR REPLACE VIEW fwd_N AS
         SELECT g.ticker, g.date,
-               g.price_t,
-               g.rn_t,
+               g.price_t, g.rn_t,
+               g.entry_date, g.exit_date, g.feature_date,
                f.date AS date_n,
                f.closeadj AS price_n,
                f.rn AS rn_n
         FROM grid_cur g
-        LEFT JOIN sep_ranked f ON f.ticker = g.ticker AND f.rn = g.rn_t + {N}
+        LEFT JOIN sep_ranked f ON f.ticker = g.ticker AND f.date = g.exit_date
         """)
         # Terminal row when price_n is null: last available forward price
-        con.execute(f"""
+        con.execute("""
         CREATE OR REPLACE VIEW terminal_row AS
         SELECT m.ticker, g.date,
                s.date AS term_date,
@@ -229,7 +299,7 @@ def main() -> None:
         WHERE g.price_n IS NULL AND g.rn_t < m.max_rn
         """)
         # Last-day case: no forward prices (rn_t = max_rn)
-        con.execute(f"""
+        con.execute("""
         CREATE OR REPLACE VIEW last_day AS
         SELECT g.ticker, g.date
         FROM fwd_N g
@@ -237,9 +307,8 @@ def main() -> None:
         WHERE g.price_n IS NULL AND g.rn_t >= m.max_rn
         """)
 
-        # Assemble horizon N: fwd_ret, fwd_holding_days, fwd_delisted, fwd_delist_type (exclude mergerfrom from flag)
-        # Tail (no forward data): NULLs — we don't know return/delist. Terminal with no action: fwd_delisted NULL.
-        con.execute(f"""
+        # Assemble horizon N: fwd_ret, fwd_holding_days (actual exit_rn - entry_rn), fwd_delisted, fwd_delist_type, fwd_exit_date, fwd_feature_date
+        con.execute("""
         CREATE OR REPLACE VIEW labels_N AS
         SELECT
             g.ticker,
@@ -250,7 +319,7 @@ def main() -> None:
                 ELSE NULL
             END AS fwd_ret,
             CASE
-                WHEN g.price_n IS NOT NULL THEN {N}
+                WHEN g.price_n IS NOT NULL THEN (g.rn_n - g.rn_t)::INTEGER
                 WHEN t.term_rn IS NOT NULL THEN (t.term_rn - g.rn_t)::INTEGER
                 ELSE NULL
             END AS fwd_holding_days,
@@ -265,7 +334,9 @@ def main() -> None:
                 WHEN t.term_closeadj IS NOT NULL AND COALESCE(e.delist_type, '') <> 'mergerfrom' THEN e.delist_type
                 WHEN ld.ticker IS NOT NULL AND COALESCE(e2.delist_type, '') <> 'mergerfrom' THEN e2.delist_type
                 ELSE CAST(NULL AS VARCHAR)
-            END AS fwd_delist_type
+            END AS fwd_delist_type,
+            g.exit_date AS fwd_exit_date,
+            g.feature_date AS fwd_feature_date
         FROM fwd_N g
         LEFT JOIN terminal_row t ON t.ticker = g.ticker AND t.date = g.date
         LEFT JOIN last_day ld ON ld.ticker = g.ticker AND ld.date = g.date
@@ -273,14 +344,16 @@ def main() -> None:
         LEFT JOIN terminal_events_resolved e2 ON e2.ticker = ld.ticker AND e2.event_date = ld.date
         """)
 
-        # One row per grid row: grid LEFT JOIN labels_N
+        # One row per grid row: grid LEFT JOIN labels_N (sparse — NULL where not rebalance entry for this horizon)
         con.execute(f"""
         CREATE OR REPLACE VIEW labels_{N}td AS
         SELECT g.ticker, g.date,
                l.fwd_ret AS fwd_ret_{N}td,
                l.fwd_holding_days AS fwd_holding_days_{N}td,
                l.fwd_delisted AS fwd_delisted_{N}td,
-               l.fwd_delist_type AS fwd_delist_type_{N}td
+               l.fwd_delist_type AS fwd_delist_type_{N}td,
+               l.fwd_exit_date AS fwd_exit_date_{N}td,
+               l.fwd_feature_date AS fwd_feature_date_{N}td
         FROM grid g
         LEFT JOIN labels_N l ON l.ticker = g.ticker AND l.date = g.date
         """)
@@ -290,7 +363,7 @@ def main() -> None:
         con.execute(f"COPY (SELECT * FROM labels_{N}td) TO {_path_sql(temp_path)} (FORMAT PARQUET)")
         log.info("Wrote %s", temp_path.name)
 
-        # Drop per-horizon views so the engine does not retain them for the next N
+        # Drop per-horizon views for next iteration
         con.execute(f"DROP VIEW IF EXISTS labels_{N}td")
         con.execute("DROP VIEW IF EXISTS labels_N")
         con.execute("DROP VIEW IF EXISTS last_day")
@@ -298,12 +371,10 @@ def main() -> None:
         con.execute("DROP VIEW IF EXISTS fwd_N")
         con.execute("DROP VIEW IF EXISTS grid_cur")
 
-    # Final join: grid + six temp parquets -> one wide table
+    # Final join: grid + four temp parquets -> one wide sparse table (4 horizons x 6 columns)
     l5_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}5td.parquet"
-    l10_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}10td.parquet"
     l21_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}21td.parquet"
     l63_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}63td.parquet"
-    l126_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}126td.parquet"
     l252_path = LABELS_DIR / f"{_LABELS_TEMP_STEM}252td.parquet"
     try:
         con.execute(
@@ -313,17 +384,17 @@ def main() -> None:
                 g.ticker,
                 g.date,
                 l5.fwd_ret_5td, l5.fwd_holding_days_5td, l5.fwd_delisted_5td, l5.fwd_delist_type_5td,
-                l10.fwd_ret_10td, l10.fwd_holding_days_10td, l10.fwd_delisted_10td, l10.fwd_delist_type_10td,
+                l5.fwd_exit_date_5td, l5.fwd_feature_date_5td,
                 l21.fwd_ret_21td, l21.fwd_holding_days_21td, l21.fwd_delisted_21td, l21.fwd_delist_type_21td,
+                l21.fwd_exit_date_21td, l21.fwd_feature_date_21td,
                 l63.fwd_ret_63td, l63.fwd_holding_days_63td, l63.fwd_delisted_63td, l63.fwd_delist_type_63td,
-                l126.fwd_ret_126td, l126.fwd_holding_days_126td, l126.fwd_delisted_126td, l126.fwd_delist_type_126td,
-                l252.fwd_ret_252td, l252.fwd_holding_days_252td, l252.fwd_delisted_252td, l252.fwd_delist_type_252td
+                l63.fwd_exit_date_63td, l63.fwd_feature_date_63td,
+                l252.fwd_ret_252td, l252.fwd_holding_days_252td, l252.fwd_delisted_252td, l252.fwd_delist_type_252td,
+                l252.fwd_exit_date_252td, l252.fwd_feature_date_252td
             FROM grid g
             LEFT JOIN read_parquet({_path_sql(l5_path)}) l5 ON l5.ticker = g.ticker AND l5.date = g.date
-            LEFT JOIN read_parquet({_path_sql(l10_path)}) l10 ON l10.ticker = g.ticker AND l10.date = g.date
             LEFT JOIN read_parquet({_path_sql(l21_path)}) l21 ON l21.ticker = g.ticker AND l21.date = g.date
             LEFT JOIN read_parquet({_path_sql(l63_path)}) l63 ON l63.ticker = g.ticker AND l63.date = g.date
-            LEFT JOIN read_parquet({_path_sql(l126_path)}) l126 ON l126.ticker = g.ticker AND l126.date = g.date
             LEFT JOIN read_parquet({_path_sql(l252_path)}) l252 ON l252.ticker = g.ticker AND l252.date = g.date
             """
         )
@@ -343,6 +414,7 @@ def _write_empty_labels(con: duckdb.DuckDBPyConnection) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    # 4 horizons x 6 columns (see docs/label_upgrade_roadmap.md)
     schema = pa.schema([
         ("ticker", pa.string()),
         ("date", pa.date32()),
@@ -350,26 +422,26 @@ def _write_empty_labels(con: duckdb.DuckDBPyConnection) -> None:
         ("fwd_holding_days_5td", pa.int64()),
         ("fwd_delisted_5td", pa.bool_()),
         ("fwd_delist_type_5td", pa.string()),
-        ("fwd_ret_10td", pa.float64()),
-        ("fwd_holding_days_10td", pa.int64()),
-        ("fwd_delisted_10td", pa.bool_()),
-        ("fwd_delist_type_10td", pa.string()),
+        ("fwd_exit_date_5td", pa.date32()),
+        ("fwd_feature_date_5td", pa.date32()),
         ("fwd_ret_21td", pa.float64()),
         ("fwd_holding_days_21td", pa.int64()),
         ("fwd_delisted_21td", pa.bool_()),
         ("fwd_delist_type_21td", pa.string()),
+        ("fwd_exit_date_21td", pa.date32()),
+        ("fwd_feature_date_21td", pa.date32()),
         ("fwd_ret_63td", pa.float64()),
         ("fwd_holding_days_63td", pa.int64()),
         ("fwd_delisted_63td", pa.bool_()),
         ("fwd_delist_type_63td", pa.string()),
-        ("fwd_ret_126td", pa.float64()),
-        ("fwd_holding_days_126td", pa.int64()),
-        ("fwd_delisted_126td", pa.bool_()),
-        ("fwd_delist_type_126td", pa.string()),
+        ("fwd_exit_date_63td", pa.date32()),
+        ("fwd_feature_date_63td", pa.date32()),
         ("fwd_ret_252td", pa.float64()),
         ("fwd_holding_days_252td", pa.int64()),
         ("fwd_delisted_252td", pa.bool_()),
         ("fwd_delist_type_252td", pa.string()),
+        ("fwd_exit_date_252td", pa.date32()),
+        ("fwd_feature_date_252td", pa.date32()),
     ])
     tbl = pa.table({c: pa.array([], type=schema.field(c).type) for c in schema.names})
     pq.write_table(tbl, FORWARD_LABELS_PATH)

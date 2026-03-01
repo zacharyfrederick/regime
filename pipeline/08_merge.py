@@ -44,11 +44,13 @@ def main() -> None:
             ("ticker", pa.string()), ("date", pa.date32()), ("sector", pa.string()), ("famaindustry", pa.string()),
             ("days_listed", pa.int32()), ("scalemarketcap", pa.float64()), ("marketcap_daily", pa.int64()), ("fwd_spinoff_60d", pa.bool_()),
             ("fwd_ret_5td", pa.float64()), ("fwd_holding_days_5td", pa.int64()), ("fwd_delisted_5td", pa.bool_()), ("fwd_delist_type_5td", pa.string()),
-            ("fwd_ret_10td", pa.float64()), ("fwd_holding_days_10td", pa.int64()), ("fwd_delisted_10td", pa.bool_()), ("fwd_delist_type_10td", pa.string()),
+            ("fwd_exit_date_5td", pa.date32()), ("fwd_feature_date_5td", pa.date32()),
             ("fwd_ret_21td", pa.float64()), ("fwd_holding_days_21td", pa.int64()), ("fwd_delisted_21td", pa.bool_()), ("fwd_delist_type_21td", pa.string()),
+            ("fwd_exit_date_21td", pa.date32()), ("fwd_feature_date_21td", pa.date32()),
             ("fwd_ret_63td", pa.float64()), ("fwd_holding_days_63td", pa.int64()), ("fwd_delisted_63td", pa.bool_()), ("fwd_delist_type_63td", pa.string()),
-            ("fwd_ret_126td", pa.float64()), ("fwd_holding_days_126td", pa.int64()), ("fwd_delisted_126td", pa.bool_()), ("fwd_delist_type_126td", pa.string()),
+            ("fwd_exit_date_63td", pa.date32()), ("fwd_feature_date_63td", pa.date32()),
             ("fwd_ret_252td", pa.float64()), ("fwd_holding_days_252td", pa.int64()), ("fwd_delisted_252td", pa.bool_()), ("fwd_delist_type_252td", pa.string()),
+            ("fwd_exit_date_252td", pa.date32()), ("fwd_feature_date_252td", pa.date32()),
             ("days_since_filing", pa.int32()), ("quarters_stale", pa.float64()),
             ("days_since_art", pa.int32()), ("days_since_arq", pa.int32()), ("days_since_filing_max", pa.int32()),
             ("ret_1m", pa.float64()), ("ret_3m", pa.float64()), ("ret_6m", pa.float64()), ("ret_12m", pa.float64()),
@@ -168,16 +170,16 @@ def main() -> None:
         SELECT u.ticker, u.date,
                CAST(NULL AS DOUBLE) AS fwd_ret_5td, CAST(NULL AS BIGINT) AS fwd_holding_days_5td,
                CAST(NULL AS BOOLEAN) AS fwd_delisted_5td, CAST(NULL AS VARCHAR) AS fwd_delist_type_5td,
-               CAST(NULL AS DOUBLE) AS fwd_ret_10td, CAST(NULL AS BIGINT) AS fwd_holding_days_10td,
-               CAST(NULL AS BOOLEAN) AS fwd_delisted_10td, CAST(NULL AS VARCHAR) AS fwd_delist_type_10td,
+               CAST(NULL AS DATE) AS fwd_exit_date_5td, CAST(NULL AS DATE) AS fwd_feature_date_5td,
                CAST(NULL AS DOUBLE) AS fwd_ret_21td, CAST(NULL AS BIGINT) AS fwd_holding_days_21td,
                CAST(NULL AS BOOLEAN) AS fwd_delisted_21td, CAST(NULL AS VARCHAR) AS fwd_delist_type_21td,
+               CAST(NULL AS DATE) AS fwd_exit_date_21td, CAST(NULL AS DATE) AS fwd_feature_date_21td,
                CAST(NULL AS DOUBLE) AS fwd_ret_63td, CAST(NULL AS BIGINT) AS fwd_holding_days_63td,
                CAST(NULL AS BOOLEAN) AS fwd_delisted_63td, CAST(NULL AS VARCHAR) AS fwd_delist_type_63td,
-               CAST(NULL AS DOUBLE) AS fwd_ret_126td, CAST(NULL AS BIGINT) AS fwd_holding_days_126td,
-               CAST(NULL AS BOOLEAN) AS fwd_delisted_126td, CAST(NULL AS VARCHAR) AS fwd_delist_type_126td,
+               CAST(NULL AS DATE) AS fwd_exit_date_63td, CAST(NULL AS DATE) AS fwd_feature_date_63td,
                CAST(NULL AS DOUBLE) AS fwd_ret_252td, CAST(NULL AS BIGINT) AS fwd_holding_days_252td,
-               CAST(NULL AS BOOLEAN) AS fwd_delisted_252td, CAST(NULL AS VARCHAR) AS fwd_delist_type_252td
+               CAST(NULL AS BOOLEAN) AS fwd_delisted_252td, CAST(NULL AS VARCHAR) AS fwd_delist_type_252td,
+               CAST(NULL AS DATE) AS fwd_exit_date_252td, CAST(NULL AS DATE) AS fwd_feature_date_252td
         FROM universe u WHERE 1=0
     """
     _empty_views = {
@@ -226,11 +228,13 @@ def main() -> None:
             u.marketcap_daily,
             u.fwd_spinoff_60d,
             l.fwd_ret_5td, l.fwd_holding_days_5td, l.fwd_delisted_5td, l.fwd_delist_type_5td,
-            l.fwd_ret_10td, l.fwd_holding_days_10td, l.fwd_delisted_10td, l.fwd_delist_type_10td,
+            l.fwd_exit_date_5td, l.fwd_feature_date_5td,
             l.fwd_ret_21td, l.fwd_holding_days_21td, l.fwd_delisted_21td, l.fwd_delist_type_21td,
+            l.fwd_exit_date_21td, l.fwd_feature_date_21td,
             l.fwd_ret_63td, l.fwd_holding_days_63td, l.fwd_delisted_63td, l.fwd_delist_type_63td,
-            l.fwd_ret_126td, l.fwd_holding_days_126td, l.fwd_delisted_126td, l.fwd_delist_type_126td,
+            l.fwd_exit_date_63td, l.fwd_feature_date_63td,
             l.fwd_ret_252td, l.fwd_holding_days_252td, l.fwd_delisted_252td, l.fwd_delist_type_252td,
+            l.fwd_exit_date_252td, l.fwd_feature_date_252td,
             f.days_since_filing,
             f.quarters_stale,
             f.days_since_art,
@@ -298,6 +302,13 @@ def main() -> None:
         FROM master_features
     """).df()
     log.info("\n%s", result.to_string())
+
+    # Label horizons are sparse (only rebalance entry dates have non-NULL); log so it's expected
+    for h in ("5td", "21td", "63td", "252td"):
+        rate = con.execute(
+            f"SELECT AVG(CASE WHEN fwd_ret_{h} IS NOT NULL THEN 1.0 ELSE 0.0 END) FROM master_features"
+        ).fetchone()[0]
+        log.info("  fwd_ret_%s non-null: %.1f%%", h, (rate or 0) * 100)
 
     total = int(result["total_rows"].iloc[0])
     tickers = int(result["tickers"].iloc[0])

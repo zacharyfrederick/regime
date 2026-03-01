@@ -80,4 +80,5 @@ Macro checks are in `08_validation.py` (section 6). Insider/institutional: [vali
 | [run_errors_remediation.md](docs/run_errors_remediation.md) | Run errors: critical vs bad assumptions, fixes applied |
 | [validation_and_biases.md](docs/validation_and_biases.md) | PIT/survivorship checklist for code review |
 | [validation_scripts.md](docs/validation_scripts.md) | Optional spot-check scripts (price, sector-relative) |
+| [label_upgrade_roadmap.md](docs/label_upgrade_roadmap.md) | Calendar-anchored forward labels: weekly (isoyear, iso_week), monthly/quarterly/annual (year, month/quarter/year); T-1 feature_date; 4 horizons × 6 columns |
 | [future_features/](docs/future_features/) | Design notes for possible future work (not implemented) |
