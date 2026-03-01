@@ -28,6 +28,9 @@ from config import (
     SEP_LOOKBACK_DAYS,
 )
 
+# Calendar-day lookback for "had recent price" (SEP activity). Keep 14 to match prior behavior.
+SEP_ACTIVITY_LOOKBACK_DAYS = 14
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
@@ -51,7 +54,8 @@ def main() -> None:
         "register tables",
         "trading_dates",
         "removal_per_ticker",
-        "candidate_ticker_dates",
+        "sep_in_range",
+        "candidate_from_sep",
         "universe_core",
         "forward event views",
         "daily_universe_base",
@@ -66,7 +70,7 @@ def main() -> None:
             # Still create output dir and write empty/schema-only if desired
     DAILY_UNIVERSE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     apply_duckdb_limits(con)
 
     # Register parquet (DuckDB does not allow prepared params in read_parquet; use literal path)
@@ -97,9 +101,11 @@ def main() -> None:
                     f"CREATE OR REPLACE VIEW actions AS SELECT * FROM read_parquet({_path_sql(path)})"
                 )
             elif name == "sep":
+                # Use sep_base so DEBUG can replace "sep" with a filtered copy without self-reference
                 con.execute(
-                    f"CREATE OR REPLACE VIEW sep AS SELECT * FROM read_parquet({_path_sql(path)})"
+                    f"CREATE OR REPLACE VIEW sep_base AS SELECT * FROM read_parquet({_path_sql(path)})"
                 )
+                con.execute("CREATE OR REPLACE VIEW sep AS SELECT * FROM sep_base")
         else:
             # Create empty view with expected columns so script can run and write empty output
             log.warning("%s not found; using empty view", path)
@@ -117,8 +123,9 @@ def main() -> None:
                 )
             elif name == "sep":
                 con.execute(
-                    "CREATE OR REPLACE VIEW sep AS SELECT CAST(NULL AS VARCHAR) AS ticker, CAST(NULL AS DATE) AS date"
+                    "CREATE OR REPLACE VIEW sep_base AS SELECT CAST(NULL AS VARCHAR) AS ticker, CAST(NULL AS DATE) AS date"
                 )
+                con.execute("CREATE OR REPLACE VIEW sep AS SELECT * FROM sep_base")
 
     register("tickers", tickers_path)
     register("actions", actions_path)
@@ -134,6 +141,10 @@ def main() -> None:
         tickers_list = ",".join(repr(t) for t in effective_tickers)
         con.execute(
             f"CREATE OR REPLACE VIEW tickers AS SELECT * FROM tickers_base WHERE ticker IN ({tickers_list})"
+        )
+        # Also limit SEP so sep_in_range and candidate_from_sep only process debug tickers (avoids full-SEP scan)
+        con.execute(
+            f"CREATE OR REPLACE VIEW sep AS SELECT * FROM sep_base WHERE ticker IN ({tickers_list})"
         )
         log.info("DEBUG: limiting universe to %d tickers: %s", len(effective_tickers), ", ".join(effective_tickers))
 
@@ -214,39 +225,55 @@ def main() -> None:
     pbar.set_postfix_str(steps[2])
     pbar.update(1)
 
-    # Active universe: ticker-date where firstpricedate <= date, (lastpricedate >= date OR lastpricedate IS NULL),
-    # and removal_date > date (or no removal), and has SEP activity in lookback window
+    # Restrict SEP to date range + lookback once so downstream only scans this subset
     con.execute(
-        """
-        CREATE OR REPLACE VIEW candidate_ticker_dates AS
-        SELECT t.ticker, d.date,
-               CAST(t.firstpricedate AS DATE) AS firstpricedate,
-               CAST(t.lastpricedate AS DATE) AS lastpricedate,
-               t.sector, t.famaindustry,
-               r.removal_date
-        FROM tickers t
-        CROSS JOIN trading_dates d
-        LEFT JOIN removal_per_ticker r ON r.ticker = t.ticker
-        WHERE t.firstpricedate IS NOT NULL AND CAST(t.firstpricedate AS DATE) <= d.date
-          AND (t.lastpricedate IS NULL OR CAST(t.lastpricedate AS DATE) >= d.date)
-          AND (r.removal_date IS NULL OR r.removal_date > d.date)
+        f"""
+        CREATE OR REPLACE VIEW sep_in_range AS
+        SELECT ticker, CAST(date AS DATE) AS date
+        FROM sep
+        WHERE CAST(date AS DATE) BETWEEN ('{DATE_START}'::DATE - INTERVAL '{SEP_ACTIVITY_LOOKBACK_DAYS} days') AND '{DATE_END}'::DATE
         """
     )
     pbar.set_postfix_str(steps[3])
     pbar.update(1)
 
-    # Require at least one SEP row in 14-day lookback so the ticker had recent price data on that date
+    # Build candidate (ticker, date) from SEP first: only dates in range where ticker had activity in lookback window
     con.execute(
-        """
-        CREATE OR REPLACE VIEW universe_core AS
-        SELECT c.ticker, c.date, c.firstpricedate, c.lastpricedate, c.sector, c.famaindustry, c.removal_date
-        FROM candidate_ticker_dates c
-        WHERE EXISTS (
-            SELECT 1 FROM sep s
-            WHERE s.ticker = c.ticker AND CAST(s.date AS DATE) <= c.date AND CAST(s.date AS DATE) >= c.date - INTERVAL '14 days'
+        f"""
+        CREATE OR REPLACE VIEW candidate_from_sep AS
+        SELECT DISTINCT s.ticker, s.date
+        FROM sep_in_range s
+        WHERE s.date BETWEEN '{DATE_START}'::DATE AND '{DATE_END}'::DATE
+          AND EXISTS (
+            SELECT 1 FROM sep_in_range s2
+            WHERE s2.ticker = s.ticker
+              AND s2.date <= s.date
+              AND s2.date >= s.date - INTERVAL '{SEP_ACTIVITY_LOOKBACK_DAYS} days'
         )
         """
     )
+    pbar.set_postfix_str(steps[4])
+    pbar.update(1)
+
+    # Join to TICKERS and removal_per_ticker: same semantics as before (firstpricedate/lastpricedate/removal_date)
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW universe_core AS
+        SELECT c.ticker, c.date,
+               CAST(t.firstpricedate AS DATE) AS firstpricedate,
+               CAST(t.lastpricedate AS DATE) AS lastpricedate,
+               t.sector, t.famaindustry,
+               r.removal_date
+        FROM candidate_from_sep c
+        INNER JOIN tickers t ON t.ticker = c.ticker
+        LEFT JOIN removal_per_ticker r ON r.ticker = c.ticker
+        WHERE t.firstpricedate IS NOT NULL AND CAST(t.firstpricedate AS DATE) <= c.date
+          AND (t.lastpricedate IS NULL OR CAST(t.lastpricedate AS DATE) >= c.date)
+          AND (r.removal_date IS NULL OR r.removal_date > c.date)
+        """
+    )
+    pbar.set_postfix_str(steps[5])
+    pbar.update(1)
 
     con.execute(
         """
@@ -256,7 +283,7 @@ def main() -> None:
         WHERE LOWER(TRIM(a.action)) = 'spinoff'
         """
     )
-    pbar.set_postfix_str(steps[5])
+    pbar.set_postfix_str(steps[6])
     pbar.update(1)
 
     # Build base view once: universe_core + days_listed + fwd_spinoff_60d (no marketcap).
@@ -278,7 +305,7 @@ def main() -> None:
         FROM universe_core u
         """
     )
-    pbar.set_postfix_str(steps[6])
+    pbar.set_postfix_str(steps[7])
     pbar.update(1)
 
     # Add marketcap_daily from DAILY when available; explicit fallback on failure
@@ -319,13 +346,13 @@ def main() -> None:
             SELECT *, CAST(NULL AS BIGINT) AS marketcap_daily, CAST(NULL AS INTEGER) AS scalemarketcap FROM daily_universe_base
             """
         )
-    pbar.set_postfix_str(steps[7])
+    pbar.set_postfix_str(steps[8])
     pbar.update(1)
 
     con.execute(
         f"COPY (SELECT * FROM daily_universe) TO {_path_sql(DAILY_UNIVERSE_PATH)} (FORMAT PARQUET)"
     )
-    pbar.set_postfix_str(steps[8])
+    pbar.set_postfix_str(steps[9])
     pbar.update(1)
     pbar.close()
 
