@@ -1,5 +1,5 @@
 # DEBUG run validation
-Generated: 2026-02-27 13:34:33
+Generated: 2026-02-28 19:53:11
 Date range: 2000-01-01 to 2024-12-31
 DEBUG_TICKERS: ('AAPL', 'MSFT', 'JPM', 'XOM', 'JNJ', 'HTZ', 'TWX', 'MON', 'TIF', 'DNKN', 'ETFC')
 
@@ -11,7 +11,7 @@ DEBUG_TICKERS: ('AAPL', 'MSFT', 'JPM', 'XOM', 'JNJ', 'HTZ', 'TWX', 'MON', 'TIF',
   master: EXISTS
   universe: EXISTS
   fp: EXISTS
-  macro: EXISTS
+  macro: MISSING
   price: EXISTS
   sector_relative: EXISTS
   insider: EXISTS
@@ -33,9 +33,6 @@ DEBUG_TICKERS: ('AAPL', 'MSFT', 'JPM', 'XOM', 'JNJ', 'HTZ', 'TWX', 'MON', 'TIF',
   AAPL pe_pit on 2020-12-31: PASS (expected ~39.01, got 39.01)
   JPM sector: PASS (Financial Services)
   XOM famaindustry: PASS (Petroleum and Natural Gas)
-  Macro yield curve Aug-Oct 2019: PASS (min=-0.040)
-  Macro VIX Mar 2020 spike: PASS (57.7 > 2*15.4)
-  Macro CPI 2022 elevated: PASS (10.8 > 2*3.0)
 
 ============================================================
   3. Sanity tests
@@ -50,26 +47,23 @@ DEBUG_TICKERS: ('AAPL', 'MSFT', 'JPM', 'XOM', 'JNJ', 'HTZ', 'TWX', 'MON', 'TIF',
   atr_14d_normalized median: WARN (0.221, expect < 0.10)
   days_since_filing (non-null): median=44, max=237 PASS
   ncfo_r2_adjusted null rate: PASS (18.4%)
-  Macro vs universe date count: PASS (6289)
-  Macro date EXCEPT: PASS (0 both directions)
-  Macro weekend dates: PASS (0)
 
 ============================================================
   4. Coverage matrix (non-null % by ticker)
 ============================================================
 
   ticker     ret_12m      pe_pit     pcf_pitncfo_r2_adjusted     vol_20d yield_curvedays_since_filing
-  AAPL           98.8%       97.0%      100.0%       97.7%      100.0%      100.0%      100.0%
-  DNKN           89.3%       93.8%       93.8%       54.4%       99.9%      100.0%      100.0%
-  ETFC           98.5%       68.5%       90.1%       67.0%      100.0%      100.0%      100.0%
-  HTZ            68.1%       71.9%       82.9%        0.0%       99.7%      100.0%      100.0%
-  JNJ            98.8%      100.0%       92.2%       99.0%      100.0%      100.0%      100.0%
-  JPM            98.8%      100.0%       54.0%       48.6%      100.0%      100.0%      100.0%
-  MON            48.6%       37.8%        0.0%        0.0%       99.6%      100.0%      100.0%
-  MSFT           98.8%      100.0%      100.0%       99.6%      100.0%      100.0%      100.0%
-  TIF            98.5%      100.0%      100.0%       82.5%      100.0%      100.0%      100.0%
-  TWX            98.3%       79.3%      100.0%       84.5%      100.0%      100.0%      100.0%
-  XOM            98.8%       96.0%      100.0%       99.1%      100.0%      100.0%      100.0%
+  AAPL           98.8%       97.0%      100.0%       97.7%      100.0%        0.0%      100.0%
+  DNKN           89.3%       93.8%       93.8%       54.4%       99.9%        0.0%      100.0%
+  ETFC           98.5%       68.5%       90.1%       67.0%      100.0%        0.0%      100.0%
+  HTZ            68.1%       71.9%       82.9%        0.0%       99.7%        0.0%      100.0%
+  JNJ            98.8%      100.0%       92.2%       99.0%      100.0%        0.0%      100.0%
+  JPM            98.8%      100.0%       54.0%       48.6%      100.0%        0.0%      100.0%
+  MON            48.6%       37.8%        0.0%        0.0%       99.6%        0.0%      100.0%
+  MSFT           98.8%      100.0%      100.0%       99.6%      100.0%        0.0%      100.0%
+  TIF            98.5%      100.0%      100.0%       82.5%      100.0%        0.0%      100.0%
+  TWX            98.3%       79.3%      100.0%       84.5%      100.0%        0.0%      100.0%
+  XOM            98.8%       96.0%      100.0%       99.1%      100.0%        0.0%      100.0%
   FLAG: pcf_pit 0% for ['MON'] (others >50%)
   FLAG: ncfo_r2_adjusted 0% for ['HTZ', 'MON'] (others >50%)
 
@@ -93,4 +87,4 @@ DEBUG_TICKERS: ('AAPL', 'MSFT', 'JPM', 'XOM', 'JNJ', 'HTZ', 'TWX', 'MON', 'TIF',
   SUMMARY
 ============================================================
 
-Critical failures: coverage_matrix
+Critical failures: contract_macro_missing

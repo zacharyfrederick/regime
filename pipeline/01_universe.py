@@ -56,7 +56,6 @@ def main() -> None:
         "forward event views",
         "daily_universe_base",
         "daily_universe (+ marketcap_daily)",
-        "daily_universe_ranked",
         "write parquet",
     ]
     pbar = tqdm(total=len(steps), desc="01_universe", unit="step", leave=True)
@@ -323,45 +322,10 @@ def main() -> None:
     pbar.set_postfix_str(steps[7])
     pbar.update(1)
 
-    # Annual market cap rank (year-end) for Dreman top-1500 universe filter
     con.execute(
-        """
-        CREATE OR REPLACE VIEW daily_universe_ranked AS
-        WITH year_ends AS (
-            SELECT
-                EXTRACT(year FROM date) AS year,
-                MAX(date) AS last_trading_day
-            FROM daily_universe
-            GROUP BY EXTRACT(year FROM date)
-        ),
-        annual_ranks AS (
-            SELECT
-                u.ticker,
-                ye.year,
-                ye.last_trading_day,
-                ROW_NUMBER() OVER (
-                    PARTITION BY ye.last_trading_day
-                    ORDER BY u.marketcap_daily DESC NULLS LAST
-                ) AS marketcap_rank_annual
-            FROM daily_universe u
-            INNER JOIN year_ends ye ON u.date = ye.last_trading_day
-            WHERE u.marketcap_daily > 0
-        )
-        SELECT
-            u.*,
-            ar.marketcap_rank_annual
-        FROM daily_universe u
-        LEFT JOIN annual_ranks ar
-            ON ar.ticker = u.ticker AND ar.year = EXTRACT(year FROM u.date)
-        """
+        f"COPY (SELECT * FROM daily_universe) TO {_path_sql(DAILY_UNIVERSE_PATH)} (FORMAT PARQUET)"
     )
     pbar.set_postfix_str(steps[8])
-    pbar.update(1)
-
-    con.execute(
-        f"COPY (SELECT * FROM daily_universe_ranked) TO {_path_sql(DAILY_UNIVERSE_PATH)} (FORMAT PARQUET)"
-    )
-    pbar.set_postfix_str(steps[9])
     pbar.update(1)
     pbar.close()
 

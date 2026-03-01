@@ -53,7 +53,7 @@ SPY_TICKER = "SPY"
 VIX_FRED_CODE = "VIXCLS"  # or use ETF proxy from SFP if preferred
 
 # Debug: limit pipeline to a few tickers for fast runs (long-history names).
-DEBUG = False
+DEBUG = True
 DEBUG_TICKERS = None  # When None and DEBUG is True, use DEBUG_TICKERS_DEFAULT.
 DEBUG_TICKERS_DEFAULT = ("AAPL", "MSFT", "JPM", "XOM", "JNJ", "HTZ", "TWX", "MON", "TIF", "DNKN", "ETFC")
 

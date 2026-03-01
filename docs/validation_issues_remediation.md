@@ -38,11 +38,11 @@ FROM read_parquet('outputs/features/fundamental_pit.parquet')
 **Investigation:**
 
 - Confirm universe schema: `daily_universe.parquet` may have been written with a column named `scalemarketcap` that is actually `marketcap_daily` or an unparsed numeric.
-- Check `01_universe.py`: it currently does **not** select `scalemarketcap` from TICKERS; it only has `marketcap_daily` and `marketcap_rank_annual`. If `07_merge` expects `u.scalemarketcap`, that column must be added in `01_universe` (or another step that writes the universe parquet).
+- Check `01_universe.py`: it computes `scalemarketcap` from `marketcap_daily` (scale 1–6 by thresholds) in `daily_universe`; the universe output no longer includes `marketcap_rank_annual` (rank can be computed later when needed). If `07_merge` expects `u.scalemarketcap`, it is provided by `01_universe`.
 
 **Fix (in 01_universe):**
 
-- **Option A:** Pull `scalemarketcap` from TICKERS (e.g. in `candidate_ticker_dates` / `universe_core`) and parse the leading digit from strings like `"1 - Nano"` to integer 1..6; propagate through to `daily_universe_ranked` and write it as an integer column (or cast to float 1–6 for schema compatibility).
+- **Option A:** Pull `scalemarketcap` from TICKERS (e.g. in `candidate_ticker_dates` / `universe_core`) and parse the leading digit from strings like `"1 - Nano"` to integer 1..6; propagate through to `daily_universe` and write it as an integer column (or cast to float 1–6 for schema compatibility).
 - **Option B:** Do not use TICKERS.scalemarketcap; instead compute a scale 1–6 from `marketcap_daily` using fixed thresholds (e.g. Nano &lt; $50M, Micro &lt; $300M, …, Mega ≥ $200B) and add that as `scalemarketcap` in the universe output.
 
 **Fix priority:** Critical. All “by scalemarketcap” analyses (e.g. insider buy rate by cap) are wrong until this is fixed.

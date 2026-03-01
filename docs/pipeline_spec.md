@@ -20,7 +20,7 @@ Run full chain: `./run_pipeline.sh` (or run scripts 01–07 in order). Timestamp
 
 - **Inputs:** config paths; raw TICKERS, ACTIONS, SEP (and optionally DAILY) under data/.
 - **Output:** `outputs/universe/daily_universe.parquet`
-- **Logic:** For each date in config range, compute active universe from TICKERS + ACTIONS (firstpricedate/lastpricedate; exclude delist, bankruptcy, voluntary/regulatory delist, mergerfrom). Optional SEP lookback for activity. Compute forward event flags (fwd_delisted_30d, fwd_delisted_90d, fwd_acquired_90d, fwd_spinoff_60d). Attach sector, famaindustry, marketcap_daily (from DAILY when available), and marketcap_rank_annual (year-end rank for Dreman top-1500 filter).
+- **Logic:** For each date in config range, compute active universe from TICKERS + ACTIONS (firstpricedate/lastpricedate; exclude delist, bankruptcy, voluntary/regulatory delist, mergerfrom). Optional SEP lookback for activity. Compute forward event flags (fwd_delisted_30d, fwd_delisted_90d, fwd_acquired_90d, fwd_spinoff_60d). Attach sector, famaindustry, marketcap_daily (from DAILY when available), and scalemarketcap. Annual market-cap rank can be computed later from marketcap_daily when needed (e.g. Dreman top-1500).
 
 ### 02_fundamentals.py
 

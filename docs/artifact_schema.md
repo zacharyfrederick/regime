@@ -17,8 +17,9 @@ Contract for every parquet output. Pipeline scripts must produce these schemas.
 | sector | VARCHAR | TICKERS.sector (GICS-approximate) |
 | famaindustry | VARCHAR | Fama-French 48 industry |
 | marketcap_daily | BIGINT | From DAILY.marketcap (PIT) when available |
-| marketcap_rank_annual | BIGINT | Year-end rank by marketcap_daily (1 = largest); NULL when no rank |
 | scalemarketcap | INTEGER | TICKERS scale 1–6 (e.g. 1=Nano … 6=Mega) or NULL when DAILY absent |
+
+Annual market-cap rank (e.g. year-end rank for Dreman top-1500) is not stored in the universe parquet; compute from `marketcap_daily` when needed.
 
 ## outputs/features/fundamental_pit.parquet
 
