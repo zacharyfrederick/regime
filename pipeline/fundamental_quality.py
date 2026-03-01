@@ -12,13 +12,88 @@ net debt trend, dilution rate. PIT-correct: only data with datekey <= vintage.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Union
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 log = logging.getLogger(__name__)
+
+
+def _fiscal_year_from_period(period: Any) -> int:
+    """Extract fiscal year from reportperiod (Timestamp, datetime64, or date-like)."""
+    if hasattr(period, "year"):
+        return int(period.year)
+    return int(pd.Timestamp(period).year)
+
+
+def rebuild_annual_from_quarters(quarters: dict[Any, dict]) -> list[dict]:
+    """
+    Group quarter dicts by fiscal year, aggregate, filter >= 3 quarters per year.
+    Returns list of annual dicts sorted by fiscal_year (no DataFrame). PIT-correct:
+    same logic as groupby().agg().query('quarters_in_year >= 3'), handles amendments
+    by rebuilding from current quarter state.
+    """
+    by_year: dict[int, list[dict]] = {}
+    for q in quarters.values():
+        fy = _fiscal_year_from_period(q["reportperiod"])
+        by_year.setdefault(fy, []).append(q)
+
+    annual_list: list[dict] = []
+    for fy in sorted(by_year.keys()):
+        qs = by_year[fy]
+        if len(qs) < 3:
+            continue
+        ncfo_annual = sum(_v(q.get("ncfo")) for q in qs)
+        fcf_annual = sum(_v(q.get("fcf")) for q in qs)
+        capex_annual = sum(_v(q.get("capex")) for q in qs)
+        roics = [q["roic"] for q in qs if q.get("roic") is not None and not (isinstance(q["roic"], float) and np.isnan(q["roic"]))]
+        roic_avg = float(np.mean(roics)) if roics else None
+        sharesbas_vals = [q["sharesbas"] for q in qs if q.get("sharesbas") is not None]
+        sharesbas_annual = max(sharesbas_vals) if sharesbas_vals else None
+        annual_list.append({
+            "fiscal_year": fy,
+            "ncfo_annual": ncfo_annual,
+            "fcf_annual": fcf_annual,
+            "capex_annual": capex_annual,
+            "roic_avg": roic_avg,
+            "sharesbas_annual": sharesbas_annual,
+            "quarters_in_year": len(qs),
+            "fcf_recon_annual": ncfo_annual + capex_annual,
+        })
+    return annual_list
+
+
+def _v(x: Any) -> float:
+    """Coerce to float for aggregation; None/NaN -> 0."""
+    if x is None:
+        return 0.0
+    if isinstance(x, float) and np.isnan(x):
+        return 0.0
+    return float(x)
+
+
+def _fast_linregress(y: np.ndarray) -> tuple[float, float]:
+    """
+    OLS slope and R² for y regressed on 0..n-1 (no intercept in formula; slope and R² match scipy.linregress).
+    Returns (slope, r_squared). Avoids scipy per-call overhead when called many times.
+    """
+    n = len(y)
+    if n < 2:
+        return (np.nan, 0.0)
+    x = np.arange(n, dtype=np.float64)
+    x_mean = (n - 1) / 2.0
+    y_mean = float(np.mean(y))
+    dx = x - x_mean
+    dy = y - y_mean
+    ss_xx = float(dx @ dx)
+    ss_xy = float(dx @ dy)
+    ss_yy = float(dy @ dy)
+    if ss_xx == 0:
+        return (np.nan, 0.0)
+    slope = ss_xy / ss_xx
+    r_squared = (ss_xy * ss_xy) / (ss_xx * ss_yy) if ss_yy > 0 else 0.0
+    return (float(slope), float(r_squared))
 
 # Minimum observations for metrics
 # MIN_YEARS_NCFO = 5: companies need 5 years of positive NCFO before R2 is computed;
@@ -33,91 +108,93 @@ MIN_QUARTERS_NET_DEBT = 4
 ARQ_LOOKBACK_YEARS = 10
 
 
-def ncfo_r2_cagr(ncfo_annual: pd.Series) -> tuple[float | None, float | None, float | None]:
+def _as_float1d(x: Union[pd.Series, np.ndarray]) -> np.ndarray:
+    """Convert Series or array to 1d float64; NaN preserved."""
+    if isinstance(x, np.ndarray):
+        return x.ravel().astype(np.float64)
+    return np.asarray(x, dtype=np.float64).ravel()
+
+
+def ncfo_r2_cagr(ncfo_annual: Union[pd.Series, np.ndarray]) -> tuple[float | None, float | None, float | None]:
     """
     OLS R² of log(ncfo) ~ time, CAGR, and fraction of years with positive NCFO.
     Returns (r_squared, cagr, pct_positive). Needs at least MIN_YEARS_NCFO positive values.
+    Accepts Series or array (time-ordered).
     """
-    ncfo = ncfo_annual.dropna()
-    if len(ncfo) < MIN_YEARS_NCFO:
+    arr = _as_float1d(ncfo_annual)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < MIN_YEARS_NCFO:
         return None, None, None
-    pct_positive = float((ncfo > 0).sum() / len(ncfo))
-    ncfo_pos = ncfo[ncfo > 0]
-    if len(ncfo_pos) < MIN_YEARS_NCFO:
+    pct_positive = float((arr > 0).sum() / len(arr))
+    arr_pos = arr[arr > 0]
+    if len(arr_pos) < MIN_YEARS_NCFO:
         return None, None, pct_positive
-    ncfo_pos = ncfo_pos.sort_index()
-    y = np.log(ncfo_pos.values)
-    t = np.arange(len(y))
-    slope, intercept, r_value, _, _ = stats.linregress(t, y)
-    r_squared = r_value ** 2
-    cagr = float(np.exp(slope) - 1.0)
+    y = np.log(arr_pos)
+    slope, r_squared = _fast_linregress(y)
+    cagr = float(np.exp(slope) - 1.0) if np.isfinite(slope) else None
     return float(r_squared), cagr, pct_positive
 
 
-def fcf_cagr(fcf_annual: pd.Series) -> float | None:
-    """Compound annual growth rate of FCF over last 5 years (or available)."""
-    fcf = fcf_annual.dropna()
-    if len(fcf) < MIN_YEARS_FCF:
+def fcf_cagr(fcf_annual: Union[pd.Series, np.ndarray]) -> float | None:
+    """Compound annual growth rate of FCF over last 5 years (or available). Accepts Series or array (time-ordered)."""
+    arr = _as_float1d(fcf_annual)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < MIN_YEARS_FCF:
         return None
-    fcf = fcf.sort_index()
-    first_val = fcf.iloc[0]
-    last_val = fcf.iloc[-1]
-    n = len(fcf) - 1
-    if n <= 0 or first_val <= 0:
-        return None
-    if last_val <= 0:
+    first_val = float(arr[0])
+    last_val = float(arr[-1])
+    n = len(arr) - 1
+    if n <= 0 or first_val <= 0 or last_val <= 0:
         return None
     return float((last_val / first_val) ** (1.0 / n) - 1.0)
 
 
-def r2_and_pct_positive(series: pd.Series, min_points: int = 3) -> tuple[float | None, float | None]:
-    """R² of log(series) ~ time and fraction of periods positive. Returns (r2, pct_positive)."""
-    s = series.dropna()
-    if len(s) < min_points:
+def r2_and_pct_positive(series: Union[pd.Series, np.ndarray], min_points: int = 3) -> tuple[float | None, float | None]:
+    """R² of log(series) ~ time and fraction of periods positive. Returns (r2, pct_positive). Accepts Series or array."""
+    arr = _as_float1d(series)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < min_points:
         return None, None
-    pct_positive = float((s > 0).sum() / len(s))
-    s_pos = s[s > 0]
-    if len(s_pos) < min_points:
+    pct_positive = float((arr > 0).sum() / len(arr))
+    arr_pos = arr[arr > 0]
+    if len(arr_pos) < min_points:
         return None, pct_positive
-    s_pos = s_pos.sort_index()
-    y = np.log(s_pos.values)
-    t = np.arange(len(y))
-    _, _, r_value, _, _ = stats.linregress(t, y)
-    return float(r_value ** 2), pct_positive
+    y = np.log(arr_pos)
+    _, r_squared = _fast_linregress(y)
+    return float(r_squared), pct_positive
 
 
-def slope_series(series: pd.Series, min_points: int = 2) -> float | None:
-    """Linear regression slope of series (index order)."""
-    s = series.dropna()
-    if len(s) < min_points:
+def slope_series(series: Union[pd.Series, np.ndarray], min_points: int = 2) -> float | None:
+    """Linear regression slope of series (index order). Accepts Series or array."""
+    arr = _as_float1d(series)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < min_points:
         return None
-    s = s.sort_index()
-    x = np.arange(len(s))
-    slope, _, _, _, _ = stats.linregress(x, s.values)
-    return float(slope)
+    slope, _ = _fast_linregress(arr)
+    return float(slope) if np.isfinite(slope) else None
 
 
-def dilution_rate(sharesbas_annual: pd.Series) -> float | None:
-    """Annualized share count growth rate over available years. Positive = dilution, negative = buybacks."""
-    s = sharesbas_annual.dropna()
-    s = s[s > 0]
-    if len(s) < 2:
+def dilution_rate(sharesbas_annual: Union[pd.Series, np.ndarray]) -> float | None:
+    """Annualized share count growth rate over available years. Positive = dilution, negative = buybacks. Accepts Series or array."""
+    arr = _as_float1d(sharesbas_annual)
+    arr = arr[~np.isnan(arr)]
+    arr = arr[arr > 0]
+    if len(arr) < 2:
         return None
-    s = s.sort_index()
-    first_val = s.iloc[0]
-    last_val = s.iloc[-1]
-    n_years = len(s) - 1
+    first_val = float(arr[0])
+    last_val = float(arr[-1])
+    n_years = len(arr) - 1
     return float((last_val / first_val) ** (1.0 / n_years) - 1.0)
 
 
 def compute_quality_metrics_for_ticker(
-    annual_df: pd.DataFrame,
-    quarterly_df: pd.DataFrame | None,
+    annual_data: Union[pd.DataFrame, list[dict]],
+    quarterly_data: Union[pd.DataFrame, list[dict], None] = None,
 ) -> dict[str, Any]:
     """
     Given annual aggregates (fiscal_year, ncfo_annual, fcf_recon_annual, roic_avg, etc.)
     and optional quarterly (for gross margin 8q, net debt 8q), compute all quality metrics.
-    NCFO and FCF series computed in parallel; includes pct_positive, r2_adjusted, delta.
+    Accepts DataFrame or list[dict] (from rebuild_annual_from_quarters) to avoid DataFrame overhead in inner loop.
     """
     out: dict[str, Any] = {
         "ncfo_r2_10y": None,
@@ -135,9 +212,13 @@ def compute_quality_metrics_for_ticker(
         "net_debt_trend": None,
         "dilution_rate": None,
     }
+
+    if isinstance(annual_data, list):
+        return _compute_quality_metrics_from_dicts(annual_data, quarterly_data, out)
+    # DataFrame path (legacy / external callers)
+    annual_df = annual_data
     if annual_df is None or annual_df.empty:
         return out
-
     annual_df = annual_df.sort_values("fiscal_year")
     ncfo_col = "ncfo_annual" if "ncfo_annual" in annual_df.columns else "ncfo"
     if ncfo_col in annual_df.columns:
@@ -170,17 +251,74 @@ def compute_quality_metrics_for_ticker(
         roic_3y = annual_df["roic_avg"].tail(3)
         out["roic_slope_3y"] = slope_series(roic_3y, MIN_YEARS_ROIC_SLOPE)
 
-    # Sharadar ARQ grossmargin: assume ratio (0-1). If your data has gross profit dollars, use gp/revenue instead.
-    if quarterly_df is not None and not quarterly_df.empty and "grossmargin" in quarterly_df.columns:
-        gm_8q = quarterly_df["grossmargin"].tail(8)
+    if quarterly_data is not None and not quarterly_data.empty and "grossmargin" in quarterly_data.columns:
+        gm_8q = quarterly_data["grossmargin"].tail(8)
         out["grossmargin_slope"] = slope_series(gm_8q, MIN_QUARTERS_GM)
 
-    if quarterly_df is not None and not quarterly_df.empty and "net_debt" in quarterly_df.columns:
-        nd_8q = quarterly_df["net_debt"].tail(8)
+    if quarterly_data is not None and not quarterly_data.empty and "net_debt" in quarterly_data.columns:
+        nd_8q = quarterly_data["net_debt"].tail(8)
         out["net_debt_trend"] = slope_series(nd_8q, MIN_QUARTERS_NET_DEBT)
 
     if "sharesbas_annual" in annual_df.columns:
         out["dilution_rate"] = dilution_rate(annual_df["sharesbas_annual"])
+
+    return out
+
+
+def _compute_quality_metrics_from_dicts(
+    annual_list: list[dict],
+    quarterly_list: list[dict] | None,
+    out: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute quality metrics from list of annual dicts and optional list of quarter dicts (no DataFrame)."""
+    if not annual_list:
+        return out
+    annual_sorted = sorted(annual_list, key=lambda r: r["fiscal_year"])
+
+    def _arr(key: str, tail_n: int) -> np.ndarray:
+        vals = [r.get(key) for r in annual_sorted[-tail_n:]]
+        return np.array(
+            [v if v is not None and not (isinstance(v, float) and np.isnan(v)) else np.nan for v in vals],
+            dtype=np.float64,
+        )
+
+    if "ncfo_annual" in annual_sorted[0]:
+        ncfo_10 = _arr("ncfo_annual", 10)
+        r2, cagr, pct_pos = ncfo_r2_cagr(ncfo_10)
+        out["ncfo_r2_10y"] = r2
+        out["ncfo_cagr_10y"] = cagr
+        out["ncfo_pct_positive"] = pct_pos
+        out["ncfo_r2_adjusted"] = (r2 * pct_pos) if (r2 is not None and pct_pos is not None) else None
+
+    if "fcf_recon_annual" in annual_sorted[0]:
+        fcf_5 = _arr("fcf_recon_annual", 5)
+        out["fcf_cagr_5y"] = fcf_cagr(fcf_5)
+        fcf_10 = _arr("fcf_recon_annual", 10)
+        fcf_r2, fcf_pct = r2_and_pct_positive(fcf_10, min_points=MIN_YEARS_FCF)
+        out["fcf_r2_10y"] = fcf_r2
+        out["fcf_pct_positive"] = fcf_pct
+        out["fcf_r2_adjusted"] = (fcf_r2 * fcf_pct) if (fcf_r2 is not None and fcf_pct is not None) else None
+        ncfo_adj = out.get("ncfo_r2_adjusted")
+        fcf_adj = out["fcf_r2_adjusted"]
+        out["fcf_ncfo_r2_delta"] = round(ncfo_adj - fcf_adj, 4) if (ncfo_adj is not None and fcf_adj is not None) else None
+
+    if "roic_avg" in annual_sorted[0]:
+        out["roic_level"] = annual_sorted[-1].get("roic_avg")
+        roic_3 = _arr("roic_avg", 3)
+        out["roic_slope_3y"] = slope_series(roic_3, MIN_YEARS_ROIC_SLOPE)
+
+    if quarterly_list:
+        q_sorted = sorted(quarterly_list, key=lambda q: pd.Timestamp(q["reportperiod"]))
+        if "grossmargin" in q_sorted[0]:
+            gm_8 = np.array([q.get("grossmargin") for q in q_sorted[-8:]], dtype=np.float64)
+            out["grossmargin_slope"] = slope_series(gm_8, MIN_QUARTERS_GM)
+        if "net_debt" in q_sorted[0]:
+            nd_8 = np.array([q.get("net_debt") for q in q_sorted[-8:]], dtype=np.float64)
+            out["net_debt_trend"] = slope_series(nd_8, MIN_QUARTERS_NET_DEBT)
+
+    if "sharesbas_annual" in annual_sorted[0]:
+        sh = _arr("sharesbas_annual", len(annual_sorted))
+        out["dilution_rate"] = dilution_rate(sh)
 
     return out
 
@@ -285,35 +423,15 @@ def compute_quality_metrics_table(
         for ticker in tickers_to_update:
             if ticker not in ticker_quarters:
                 continue
-            ticker_quarterly = pd.DataFrame(ticker_quarters[ticker].values())
-            if ticker_quarterly.empty:
+            quarters = ticker_quarters[ticker]
+            annual_list = rebuild_annual_from_quarters(quarters)
+            if not annual_list:
                 continue
-            ticker_quarterly["reportperiod"] = pd.to_datetime(ticker_quarterly["reportperiod"])
-            ticker_quarterly = ticker_quarterly.sort_values("reportperiod")
-            ticker_quarterly["fiscal_year"] = ticker_quarterly["reportperiod"].dt.year
-
-            ticker_annual = (
-                ticker_quarterly.groupby("fiscal_year", as_index=False)
-                .agg(
-                    ncfo_annual=("ncfo", "sum"),
-                    fcf_annual=("fcf", "sum"),
-                    capex_annual=("capex", "sum"),
-                    roic_avg=("roic", "mean"),
-                    sharesbas_annual=("sharesbas", "max"),
-                    quarters_in_year=("ncfo", "count"),
-                )
-                .query("quarters_in_year >= 3")
-                .sort_values("fiscal_year")
-            )
-            if ticker_annual.empty:
-                continue
-            ticker_annual["fcf_recon_annual"] = (
-                ticker_annual["ncfo_annual"] + ticker_annual["capex_annual"]
-            )
+            quarterly_list = sorted(quarters.values(), key=lambda q: pd.Timestamp(q["reportperiod"]))
 
             metrics = compute_quality_metrics_for_ticker(
-                ticker_annual,
-                ticker_quarterly,
+                annual_list,
+                quarterly_list,
             )
             # Emit only vintages inside the pipeline window; we still accumulate state for earlier vintages
             if pd.Timestamp(date_start) <= vintage <= pd.Timestamp(date_end):

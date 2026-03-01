@@ -6,6 +6,7 @@ Output: outputs/features/fundamental_pit.parquet
 """
 import logging
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,9 +154,11 @@ def main() -> None:
         row[0] for row in con.execute("SELECT DISTINCT ticker FROM grid").fetchall()
     )
     log.info("Computing quality metrics from ARQ (vintage loop)...")
+    t0 = time.time()
     quality_df = compute_quality_metrics_table(
         con, DATE_START, DATE_END, universe_tickers=ticker_set
     )
+    log.info("quality metrics took %.1fs", time.time() - t0)
     log.info("quality_df.shape: %s", quality_df.shape)
     if not quality_df.empty and "ncfo_r2_adjusted" in quality_df.columns:
         sample = quality_df[["ticker", "datekey", "ncfo_r2_adjusted"]].dropna(subset=["ncfo_r2_adjusted"]).head(5)
@@ -196,12 +199,11 @@ def main() -> None:
             "CREATE OR REPLACE VIEW sep AS SELECT CAST(NULL AS VARCHAR) AS ticker, CAST(NULL AS DATE) AS date, CAST(NULL AS DOUBLE) AS closeadj WHERE 1=0"
         )
 
-    # Step 3: ART path — most recent ART per (ticker, date) + SEP for current price; TTM metrics and valuation
-    # ASOF: most recent art where datekey <= date; then join SEP for closeadj.
-    # Extended with divyield, dps, roe, ebt, currentratio, liabilities, epsdil for dividend/quality/earnings features.
+    # Step 3: ART path — single pass over grid with both current and prior-year ASOF joins
+    # PIT: a_prior must use g.date - 1 year (NOT g.date) so we get prior-year TTM earnings; otherwise earnings_growth_yoy would be wrong.
     con.execute(
         """
-        CREATE OR REPLACE VIEW art_snapshot AS
+        CREATE OR REPLACE VIEW art_snapshot_combined AS
         SELECT g.ticker, g.date,
                a.datekey_date AS art_datekey,
                a.netinccmn, a.ncfo, a.fcf AS fcf_sharadar, a.capex,
@@ -209,36 +211,25 @@ def main() -> None:
                a.assets, a.revenueusd, a.revenue, a.sbcomp,
                a.equity, a.debt, a.cashnequsd, a.ebitda, a.shareswa,
                a.divyield, a.dps, a.roe, a.ebt, a.currentratio, a.liabilities, a.epsdil,
-               s.closeadj
+               s.closeadj,
+               a_prior.epsdil AS epsdil_prior
         FROM grid g
         ASOF LEFT JOIN (
             SELECT *, CAST(datekey AS DATE) AS datekey_date
             FROM art
             ORDER BY datekey_date
         ) a ON a.ticker = g.ticker AND a.datekey_date <= g.date
-        LEFT JOIN sep s ON s.ticker = g.ticker AND s.date = g.date
-        """
-    )
-
-    # Prior-year ART snapshot for YoY earnings growth (TTM epsdil vs TTM epsdil 1 year ago)
-    con.execute(
-        """
-        CREATE OR REPLACE VIEW art_snapshot_prior AS
-        SELECT g.ticker, g.date,
-               a.datekey_date AS art_datekey_prior,
-               a.epsdil AS epsdil_prior
-        FROM grid g
         ASOF LEFT JOIN (
             SELECT ticker, CAST(datekey AS DATE) AS datekey_date, epsdil
             FROM art
             ORDER BY datekey_date
-        ) a ON a.ticker = g.ticker AND a.datekey_date <= g.date - INTERVAL '1 year'
+        ) a_prior ON a_prior.ticker = g.ticker AND a_prior.datekey_date <= g.date - INTERVAL '1 year'
+        LEFT JOIN sep s ON s.ticker = g.ticker AND s.date = g.date
         """
     )
 
-    # Step 4: Merge — grid + ASOF quality_metrics + art_snapshot (TTM + valuation from current price)
+    # Step 4: Merge — grid + ASOF quality_metrics + art_snapshot_combined (one join; no ORDER BY — parquet doesn't preserve order)
     # datekey = latest of art_datekey and arq_datekey; staleness from that. FCF from fcf_recon.
-    # EV/EBITDA uses marketcap + debt - cash; preferred stock omitted (add if SF1 has preferredstock).
     con.execute(
         """
         CREATE OR REPLACE VIEW fundamental_pit AS
@@ -271,7 +262,7 @@ def main() -> None:
             q.grossmargin_slope,
             CASE WHEN art.netinccmn IS NOT NULL AND art.netinccmn <> 0 THEN (art.ncfo + art.capex) / art.netinccmn ELSE NULL END AS fcf_conversion,
             CASE WHEN art.assets IS NOT NULL AND art.assets <> 0 THEN (art.netinccmn - art.ncfo) / art.assets ELSE NULL END AS accrual_ratio,
-            -- revenueusd preferred for consistency with USD market cap; for non-USD filers uses period exchange rate (small distortion but consistent)
+            -- revenueusd preferred for consistency with USD market cap; for non-USD filers uses period exchange rate
             CASE WHEN COALESCE(art.revenueusd, art.revenue) > 0 THEN art.sbcomp / COALESCE(art.revenueusd, art.revenue) ELSE NULL END AS sbc_pct_revenue,
             ABS(art.capex) / NULLIF(COALESCE(art.revenueusd, art.revenue), 0) AS capex_intensity,
             q.net_debt_trend,
@@ -279,7 +270,6 @@ def main() -> None:
             art.ncfo + art.capex AS fcf_recon_ttm,
             CASE WHEN art.shareswa IS NOT NULL AND art.shareswa > 0 AND art.closeadj IS NOT NULL AND art.ncfo > 0
                  THEN (art.closeadj * art.shareswa) / NULLIF(art.ncfo, 0) ELSE NULL END AS pcf_pit,
-            -- pfcf_pit allows negative FCF intentionally: negative P/FCF = company cash-flow negative after capex (meaningful); only guard is division by zero
             CASE WHEN art.shareswa IS NOT NULL AND art.shareswa > 0 AND art.closeadj IS NOT NULL AND (art.ncfo + art.capex) <> 0
                  THEN (art.closeadj * art.shareswa) / (art.ncfo + art.capex) ELSE NULL END AS pfcf_pit,
             art.ncfo / NULLIF(COALESCE(art.revenueusd, art.revenue), 0) AS ncfo_to_revenue,
@@ -299,28 +289,22 @@ def main() -> None:
             art.debt / NULLIF(art.equity, 0) AS debt_to_equity,
             art.liabilities / NULLIF(art.assets, 0) AS liabilities_to_assets,
             art.dps / NULLIF(art.epsdil, 0) AS payout_ratio,
-            CASE WHEN art.epsdil IS NOT NULL AND art_prior.epsdil_prior IS NOT NULL AND art_prior.epsdil_prior <> 0
-                 THEN (art.epsdil - art_prior.epsdil_prior) / NULLIF(art_prior.epsdil_prior, 0) ELSE NULL END AS earnings_growth_yoy
+            CASE WHEN art.epsdil IS NOT NULL AND art.epsdil_prior IS NOT NULL AND art.epsdil_prior <> 0
+                 THEN (art.epsdil - art.epsdil_prior) / NULLIF(art.epsdil_prior, 0) ELSE NULL END AS earnings_growth_yoy
         FROM grid g
         ASOF LEFT JOIN (
             SELECT *, CAST(datekey AS DATE) AS datekey_date
             FROM quality_metrics
             ORDER BY datekey_date
         ) q ON q.ticker = g.ticker AND q.datekey_date <= g.date
-        LEFT JOIN art_snapshot art ON art.ticker = g.ticker AND art.date = g.date
-        LEFT JOIN art_snapshot_prior art_prior ON art_prior.ticker = g.ticker AND art_prior.date = g.date
-        ORDER BY g.ticker, g.date
+        LEFT JOIN art_snapshot_combined art ON art.ticker = g.ticker AND art.date = g.date
         """
     )
 
     try:
-        con.execute(f"COPY (SELECT * FROM fundamental_pit) TO {_path_sql(FUNDAMENTAL_PIT_PATH)} (FORMAT PARQUET)")
-        log.info("Wrote %s", FUNDAMENTAL_PIT_PATH)
-        # Verify written schema matches FUNDAMENTAL_PIT_SCHEMA (read columns from result; parquet_schema() columns vary by DuckDB version)
+        # Get schema from view before writing so we don't re-read the parquet for verification
         actual = set(
-            con.execute(f"SELECT * FROM read_parquet({_path_sql(FUNDAMENTAL_PIT_PATH)}) LIMIT 0")
-            .df()
-            .columns
+            con.execute("SELECT * FROM fundamental_pit LIMIT 0").df().columns
         )
         expected = {col for col, _ in FUNDAMENTAL_PIT_SCHEMA}
         missing = expected - actual
@@ -331,6 +315,8 @@ def main() -> None:
             log.warning("Schema has extra columns: %s", extra)
         if not missing and not extra:
             log.info("Schema matches exactly")
+        con.execute(f"COPY (SELECT * FROM fundamental_pit) TO {_path_sql(FUNDAMENTAL_PIT_PATH)} (FORMAT PARQUET)")
+        log.info("Wrote %s", FUNDAMENTAL_PIT_PATH)
     except Exception as e:
         log.error("Write failed: %s. Writing empty output.", e)
         _write_empty_fundamental_pit()
