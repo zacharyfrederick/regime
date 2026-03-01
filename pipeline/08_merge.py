@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 def main() -> None:
     log.info("Starting 07_merge")
     MASTER_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     apply_duckdb_limits(con)
 
     if not DAILY_UNIVERSE_PATH.exists():

@@ -148,12 +148,20 @@ def main() -> None:
         )
         log.info("DEBUG: limiting universe to %d tickers: %s", len(effective_tickers), ", ".join(effective_tickers))
 
-    # Trading dates in range from SEP (cast date to DATE in case parquet has VARCHAR)
+    # Materialize cleaned tables once so downstream views avoid repeated CAST/LOWER(TRIM)
+    con.execute(
+        "CREATE OR REPLACE TABLE actions_clean AS SELECT ticker, LOWER(TRIM(action)) AS action, CAST(date AS DATE) AS date FROM actions"
+    )
+    con.execute(
+        "CREATE OR REPLACE TABLE sep_clean AS SELECT ticker, CAST(date AS DATE) AS date FROM sep"
+    )
+
+    # Trading dates in range from SEP
     con.execute(
         f"""
         CREATE OR REPLACE VIEW trading_dates AS
-        SELECT DISTINCT CAST(date AS DATE) AS date FROM sep
-        WHERE CAST(date AS DATE) BETWEEN '{DATE_START}'::DATE AND '{DATE_END}'::DATE
+        SELECT DISTINCT date FROM sep_clean
+        WHERE date BETWEEN '{DATE_START}'::DATE AND '{DATE_END}'::DATE
         ORDER BY date
         """
     )
@@ -170,20 +178,21 @@ def main() -> None:
 
     # Resolved terminal events: one row per (ticker, event_date) with delist_type from companion row.
     # Exclude renames (tickerchangefrom within ±5 days). mergerfrom included for reporting but excluded from flag logic below.
+    # Use actions_clean so LOWER(TRIM(action)) and CAST(date) are done once.
     con.execute(
         """
         CREATE OR REPLACE VIEW delist_dates AS
-        SELECT ticker, CAST(date AS DATE) AS event_date
-        FROM actions
-        WHERE LOWER(TRIM(action)) = 'delisted'
+        SELECT ticker, date AS event_date
+        FROM actions_clean
+        WHERE action = 'delisted'
         """
     )
     con.execute(
         """
         CREATE OR REPLACE VIEW delist_reasons AS
-        SELECT ticker, CAST(date AS DATE) AS event_date, LOWER(TRIM(action)) AS action
-        FROM actions
-        WHERE LOWER(TRIM(action)) IN ('acquisitionby','bankruptcyliquidation','regulatorydelisting','voluntarydelisting','mergerfrom')
+        SELECT ticker, date AS event_date, action
+        FROM actions_clean
+        WHERE action IN ('acquisitionby','bankruptcyliquidation','regulatorydelisting','voluntarydelisting','mergerfrom')
         """
     )
     con.execute(
@@ -197,9 +206,9 @@ def main() -> None:
     con.execute(
         """
         CREATE OR REPLACE VIEW renames_near_delist AS
-        SELECT ticker, CAST(date AS DATE) AS rename_date
-        FROM actions
-        WHERE LOWER(TRIM(action)) = 'tickerchangefrom'
+        SELECT ticker, date AS rename_date
+        FROM actions_clean
+        WHERE action = 'tickerchangefrom'
         """
     )
     con.execute(
@@ -225,31 +234,26 @@ def main() -> None:
     pbar.set_postfix_str(steps[2])
     pbar.update(1)
 
-    # Restrict SEP to date range + lookback once so downstream only scans this subset
+    # Restrict SEP to date range + lookback once (sep_clean already has date cast)
     con.execute(
         f"""
         CREATE OR REPLACE VIEW sep_in_range AS
-        SELECT ticker, CAST(date AS DATE) AS date
-        FROM sep
-        WHERE CAST(date AS DATE) BETWEEN ('{DATE_START}'::DATE - INTERVAL '{SEP_ACTIVITY_LOOKBACK_DAYS} days') AND '{DATE_END}'::DATE
+        SELECT ticker, date
+        FROM sep_clean
+        WHERE date BETWEEN ('{DATE_START}'::DATE - INTERVAL '{SEP_ACTIVITY_LOOKBACK_DAYS} days') AND '{DATE_END}'::DATE
         """
     )
     pbar.set_postfix_str(steps[3])
     pbar.update(1)
 
-    # Build candidate (ticker, date) from SEP first: only dates in range where ticker had activity in lookback window
+    # Candidate (ticker, date): every row in sep_in_range in pipeline date range (EXISTS was redundant: row satisfies itself).
+    # DISTINCT preserves original behavior if SEP has duplicate (ticker, date) rows.
     con.execute(
         f"""
         CREATE OR REPLACE VIEW candidate_from_sep AS
-        SELECT DISTINCT s.ticker, s.date
-        FROM sep_in_range s
-        WHERE s.date BETWEEN '{DATE_START}'::DATE AND '{DATE_END}'::DATE
-          AND EXISTS (
-            SELECT 1 FROM sep_in_range s2
-            WHERE s2.ticker = s.ticker
-              AND s2.date <= s.date
-              AND s2.date >= s.date - INTERVAL '{SEP_ACTIVITY_LOOKBACK_DAYS} days'
-        )
+        SELECT DISTINCT ticker, date
+        FROM sep_in_range
+        WHERE date BETWEEN '{DATE_START}'::DATE AND '{DATE_END}'::DATE
         """
     )
     pbar.set_postfix_str(steps[4])
@@ -278,16 +282,16 @@ def main() -> None:
     con.execute(
         """
         CREATE OR REPLACE VIEW spinoff_60 AS
-        SELECT a.ticker, CAST(a.date AS DATE) AS action_date
-        FROM actions a
-        WHERE LOWER(TRIM(a.action)) = 'spinoff'
+        SELECT ticker, date AS action_date
+        FROM actions_clean
+        WHERE action = 'spinoff'
         """
     )
     pbar.set_postfix_str(steps[6])
     pbar.update(1)
 
     # Build base view once: universe_core + days_listed + fwd_spinoff_60d (no marketcap).
-    # Delist/acquired flags live in forward_labels (06_5_labels), not in universe.
+    # fwd_spinoff_60d via LEFT JOIN + BOOL_OR to avoid per-row correlated EXISTS.
     con.execute(
         """
         CREATE OR REPLACE VIEW daily_universe_base AS
@@ -296,13 +300,15 @@ def main() -> None:
             u.date,
             TRUE AS in_universe,
             DATEDIFF('day', u.firstpricedate, u.date)::INTEGER AS days_listed,
-            EXISTS (
-                SELECT 1 FROM spinoff_60 s
-                WHERE s.ticker = u.ticker AND s.action_date > u.date AND s.action_date <= u.date + INTERVAL '60 days'
-            ) AS fwd_spinoff_60d,
+            COALESCE(BOOL_OR(s.ticker IS NOT NULL), FALSE) AS fwd_spinoff_60d,
             u.sector,
             u.famaindustry
         FROM universe_core u
+        LEFT JOIN spinoff_60 s
+            ON s.ticker = u.ticker
+            AND s.action_date > u.date
+            AND s.action_date <= u.date + INTERVAL '60 days'
+        GROUP BY u.ticker, u.date, u.firstpricedate, u.sector, u.famaindustry
         """
     )
     pbar.set_postfix_str(steps[7])
@@ -349,6 +355,7 @@ def main() -> None:
     pbar.set_postfix_str(steps[8])
     pbar.update(1)
 
+    n = con.execute("SELECT COUNT(*) FROM daily_universe").fetchone()[0]
     con.execute(
         f"COPY (SELECT * FROM daily_universe) TO {_path_sql(DAILY_UNIVERSE_PATH)} (FORMAT PARQUET)"
     )
@@ -356,9 +363,6 @@ def main() -> None:
     pbar.update(1)
     pbar.close()
 
-    n = con.execute(
-        f"SELECT COUNT(*) FROM read_parquet({_path_sql(DAILY_UNIVERSE_PATH)})"
-    ).fetchone()[0]
     log.info("Wrote %s: %d rows", DAILY_UNIVERSE_PATH, n)
     if n == 0:
         log.error("Universe is empty - check TICKERS and SEP data")

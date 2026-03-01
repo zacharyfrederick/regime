@@ -111,7 +111,7 @@ def _write_empty_fundamental_pit() -> None:
 
 def main() -> None:
     FUNDAMENTAL_PIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     apply_duckdb_limits(con)
 
     def _path_sql(p: Path) -> str:

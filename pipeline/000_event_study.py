@@ -45,7 +45,7 @@ def _ps(p: Path) -> str:
 
 
 def main():
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     lines: list[str] = []
 
     def out(s: str = ""):

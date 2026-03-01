@@ -38,7 +38,7 @@ def _parquet(name: str) -> Path:
 def main() -> None:
     log.info("Building price features (SEP -> returns, vol, 52w, ATR, MA cross, momentum skew)")
     PRICE_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     apply_duckdb_limits(con)
 
     if not DAILY_UNIVERSE_PATH.exists():

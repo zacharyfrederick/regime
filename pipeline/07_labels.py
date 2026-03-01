@@ -50,7 +50,7 @@ def _parquet(name: str) -> Path:
 def main() -> None:
     log.info("Building forward labels (09_labels)")
     FORWARD_LABELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     apply_duckdb_limits(con)
 
     def _path_sql(p: Path) -> str:

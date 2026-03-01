@@ -36,7 +36,7 @@ FRED_SERIES_STEMS = [
 
 def main() -> None:
     MACRO_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     apply_duckdb_limits(con)
 
     if not FRED_DIR.exists():

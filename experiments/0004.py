@@ -78,7 +78,7 @@ def main():
     print(f"Master features: {MASTER_FEATURES_PATH}")
     assert MASTER_FEATURES_PATH.exists(), f"Master features not found: {MASTER_FEATURES_PATH}"
 
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     master_path = repr(str(MASTER_FEATURES_PATH.resolve()))
 
     exclude_list = ",".join(f"'{s}'" for s in EXCLUDE_SECTORS)

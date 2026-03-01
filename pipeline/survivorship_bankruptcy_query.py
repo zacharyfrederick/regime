@@ -45,7 +45,7 @@ def main() -> None:
         print("ERROR: daily_universe.parquet not found at", universe_path, file=sys.stderr)
         sys.exit(1)
 
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     con.execute(f"CREATE VIEW actions AS SELECT * FROM read_parquet({_path_sql(actions_path)})")
     con.execute(f"CREATE VIEW universe AS SELECT * FROM read_parquet({_path_sql(universe_path)})")
 

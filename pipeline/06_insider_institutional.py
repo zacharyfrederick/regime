@@ -67,7 +67,7 @@ def _write_empty() -> None:
 
 def main() -> None:
     INSIDER_INSTITUTIONAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
     apply_duckdb_limits(con)
 
     def _path_sql(p: Path) -> str:

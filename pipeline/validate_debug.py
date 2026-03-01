@@ -75,7 +75,7 @@ def run() -> tuple[list[str], list[str]]:
         out(f"DEBUG_TICKERS: {config.DEBUG_TICKERS_DEFAULT}")
     out("")
 
-    con = duckdb.connect(":memory:")
+    con = duckdb.connect()
 
     # Artifact paths
     paths = {
