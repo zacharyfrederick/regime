@@ -1,7 +1,12 @@
 """
-Rolling fundamental quality metrics from ARQ (annual aggregation) and ARY where needed.
+Rolling fundamental quality metrics from ARY (annual) and ARQ (quarterly only for 8Q metrics).
 Used by 02_fundamentals: NCFO R²/CAGR, FCF CAGR, ROIC slope, gross margin slope,
 net debt trend, dilution rate. PIT-correct: only data with datekey <= vintage.
+
+Annual series: ARY (Sharadar annual, excluding restatements). Pre-aggregated by fiscal year,
+avoids fiscal-year-boundary bugs from grouping ARQ by reportperiod.year. Amendments (10-K/A)
+handled by keeping latest datekey per (ticker, reportperiod) at each vintage.
+Quarterly: ARQ only for last-8-quarters gross margin slope and net debt trend.
 """
 # SHARADAR SIGN CONVENTIONS (empirically verified in 00_testing capex check)
 # - capex: negative (cash outflow), e.g. AAPL 2020: capex = -7,309,000,000
@@ -64,6 +69,31 @@ def rebuild_annual_from_quarters(quarters: dict[Any, dict]) -> list[dict]:
     return annual_list
 
 
+def ary_records_to_annual_list(ary_records: dict[Any, dict]) -> list[dict]:
+    """
+    Convert ARY records (reportperiod -> row) to list of annual dicts for metric functions.
+    ARY is already one row per fiscal year; reportperiod is the fiscal year-end date.
+    PIT: caller passes the deduplicated map (latest datekey per reportperiod at vintage).
+    """
+    if not ary_records:
+        return []
+    out: list[dict] = []
+    for period, r in ary_records.items():
+        fy = _fiscal_year_from_period(period)
+        ncfo = r.get("ncfo")
+        capex = r.get("capex")
+        roic = r.get("roic")
+        roic_avg = roic if (roic is not None and not (isinstance(roic, float) and np.isnan(roic))) else None
+        out.append({
+            "fiscal_year": fy,
+            "ncfo_annual": ncfo if ncfo is not None and not (isinstance(ncfo, float) and np.isnan(ncfo)) else None,
+            "fcf_recon_annual": _v(ncfo) + _v(capex),
+            "roic_avg": roic_avg,
+            "sharesbas_annual": r.get("sharesbas"),
+        })
+    return sorted(out, key=lambda x: x["fiscal_year"])
+
+
 def _v(x: Any) -> float:
     """Coerce to float for aggregation; None/NaN -> 0."""
     if x is None:
@@ -104,8 +134,9 @@ MIN_YEARS_ROIC_SLOPE = 2
 MIN_QUARTERS_GM = 4
 MIN_QUARTERS_NET_DEBT = 4
 
-# Years of ARQ history to load before date_start so rolling 10y metrics have enough data
+# Years of history to load before date_start so rolling 10y metrics have enough data
 ARQ_LOOKBACK_YEARS = 10
+ARY_LOOKBACK_YEARS = 10
 
 
 def _as_float1d(x: Union[pd.Series, np.ndarray]) -> np.ndarray:
@@ -331,9 +362,8 @@ def compute_quality_metrics_table(
 ) -> pd.DataFrame:
     """
     Build quality_metrics table: one row per (ticker, datekey) for each filing date.
-    PIT-correct: per-ticker quarterly state updated only with new filings each vintage;
-    DataFrame build and groupby are scoped to tickers that filed (no full-dataset
-    aggregation). New filings processed via to_dict("records") to avoid iterrows() overhead.
+    PIT-correct: ARY gives annual series (latest datekey per reportperiod at each vintage);
+    ARQ gives quarterly state for 8Q metrics. Tickers_to_update = filers on ARQ or ARY this vintage.
     When universe_tickers is provided, only those tickers are loaded and computed.
     """
     try:
@@ -368,7 +398,7 @@ def compute_quality_metrics_table(
                 {grossmargin_expr}
             FROM sf1
             WHERE dimension = 'ARQ'
-            AND CAST(datekey AS DATE) BETWEEN ('{date_start}'::DATE - INTERVAL '{ARQ_LOOKBACK_YEARS} years') AND '{date_end}'::DATE  -- lookback required for 10y rolling ncfo_r2
+            AND CAST(datekey AS DATE) BETWEEN ('{date_start}'::DATE - INTERVAL '{ARQ_LOOKBACK_YEARS} years') AND '{date_end}'::DATE
             {ticker_filter}
             ORDER BY ticker, datekey
         """).df()
@@ -387,16 +417,34 @@ def compute_quality_metrics_table(
     all_arq["fiscal_year"] = all_arq["reportperiod"].dt.year
     all_arq["net_debt"] = all_arq["debt"] - all_arq["cashnequsd"]
 
-    vintages = sorted(all_arq["datekey"].unique())
-    vintage_to_tickers = (
-        all_arq.groupby("datekey")["ticker"]
-        .apply(set)
-        .to_dict()
-    )
+    # ARY: annual series for NCFO/FCF/ROIC/dilution (PIT: latest datekey per reportperiod at each vintage)
+    all_ary = pd.DataFrame()
+    try:
+        all_ary = con.execute(f"""
+            SELECT ticker, reportperiod, datekey, ncfo, capex, roic, sharesbas
+            FROM sf1
+            WHERE dimension = 'ARY'
+            AND CAST(datekey AS DATE) BETWEEN ('{date_start}'::DATE - INTERVAL '{ARY_LOOKBACK_YEARS} years') AND '{date_end}'::DATE
+            {ticker_filter}
+            ORDER BY ticker, datekey
+        """).df()
+    except Exception as e:
+        log.warning("ARY pull failed; annual metrics will use ARQ aggregation fallback: %s", e)
+    if not all_ary.empty:
+        all_ary["reportperiod"] = pd.to_datetime(all_ary["reportperiod"])
+        all_ary["datekey"] = pd.to_datetime(all_ary["datekey"])
 
-    # Per-ticker quarterly accumulation: ticker -> { reportperiod -> record }
-    # Avoids full pd.DataFrame(current_pit.values()) every vintage.
+    # Unified vintages and tickers that filed (ARQ or ARY) on each date
+    vintages = sorted(set(all_arq["datekey"].unique()))
+    vintage_to_tickers = all_arq.groupby("datekey")["ticker"].apply(set).to_dict()
+    if not all_ary.empty:
+        vintages = sorted(set(vintages) | set(all_ary["datekey"].unique()))
+        for d, s in all_ary.groupby("datekey")["ticker"].apply(set).to_dict().items():
+            vintage_to_tickers[d] = vintage_to_tickers.get(d, set()) | s
+
+    # Per-ticker state: ARQ quarters (for 8Q metrics); ARY annual (for NCFO/FCF/ROIC/dilution)
     ticker_quarters: dict[str, dict[Any, dict]] = {}
+    ticker_ary: dict[str, dict[Any, dict]] = {}
     rows = []
 
     try:
@@ -406,8 +454,9 @@ def compute_quality_metrics_table(
         vintage_iter = vintages
 
     for vintage in vintage_iter:
-        new_filings = all_arq[all_arq["datekey"] == vintage]
-        for record in new_filings.to_dict("records"):
+        # ARQ: accumulate quarterly filings (amendments: later datekey wins)
+        new_arq = all_arq[all_arq["datekey"] == vintage]
+        for record in new_arq.to_dict("records"):
             ticker = record["ticker"]
             period = record["reportperiod"]
             if ticker not in ticker_quarters:
@@ -416,15 +465,28 @@ def compute_quality_metrics_table(
             if existing is None or record["datekey"] >= existing["datekey"]:
                 ticker_quarters[ticker][period] = record
 
+        # ARY: accumulate annual filings (amendments: later datekey wins per reportperiod)
+        if not all_ary.empty:
+            new_ary = all_ary[all_ary["datekey"] == vintage]
+            for record in new_ary.to_dict("records"):
+                ticker = record["ticker"]
+                period = record["reportperiod"]
+                if ticker not in ticker_ary:
+                    ticker_ary[ticker] = {}
+                existing = ticker_ary[ticker].get(period)
+                if existing is None or record["datekey"] >= existing["datekey"]:
+                    ticker_ary[ticker][period] = record
+
         tickers_to_update = vintage_to_tickers.get(vintage, set())
         if not tickers_to_update:
             continue
 
         for ticker in tickers_to_update:
-            if ticker not in ticker_quarters:
-                continue
-            quarters = ticker_quarters[ticker]
-            annual_list = rebuild_annual_from_quarters(quarters)
+            quarters = ticker_quarters.get(ticker, {})
+            # Annual series: ARY if available, else ARQ aggregation (fallback)
+            annual_list = ary_records_to_annual_list(ticker_ary.get(ticker, {}))
+            if not annual_list:
+                annual_list = rebuild_annual_from_quarters(quarters)
             if not annual_list:
                 continue
             quarterly_list = sorted(quarters.values(), key=lambda q: pd.Timestamp(q["reportperiod"]))
@@ -434,6 +496,7 @@ def compute_quality_metrics_table(
                 quarterly_list,
             )
             # Emit only vintages inside the pipeline window; we still accumulate state for earlier vintages
+            # datekey = filing date (10-Q or 10-K) that triggered this row; downstream joins on datekey <= date (PIT).
             if pd.Timestamp(date_start) <= vintage <= pd.Timestamp(date_end):
                 rows.append({
                     "ticker": ticker,
