@@ -134,14 +134,35 @@ def main() -> None:
         WHERE LOWER(TRIM(action)) = 'tickerchangefrom'
         """
     )
+    # One row per (ticker, event_date); multiple ACTIONS on same date (e.g. delisted + acquisitionby) would otherwise fan out in labels_N.
     con.execute(
         """
         CREATE OR REPLACE VIEW terminal_events_resolved AS
-        SELECT r.ticker, r.event_date, r.delist_type
-        FROM resolved_delists_raw r
-        LEFT JOIN renames_near_delist tc ON tc.ticker = r.ticker
-            AND ABS(DATEDIFF('day', tc.rename_date, r.event_date)) <= 5
-        WHERE tc.rename_date IS NULL
+        WITH base AS (
+            SELECT r.ticker, r.event_date, r.delist_type
+            FROM resolved_delists_raw r
+            LEFT JOIN renames_near_delist tc ON tc.ticker = r.ticker
+                AND ABS(DATEDIFF('day', tc.rename_date, r.event_date)) <= 5
+            WHERE tc.rename_date IS NULL
+        ),
+        ranked AS (
+            SELECT ticker, event_date, delist_type,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY ticker, event_date
+                       ORDER BY CASE delist_type
+                           WHEN 'acquisitionby' THEN 1
+                           WHEN 'bankruptcyliquidation' THEN 2
+                           WHEN 'voluntarydelisting' THEN 3
+                           WHEN 'regulatorydelisting' THEN 4
+                           WHEN 'mergerfrom' THEN 5
+                           ELSE 6
+                       END
+                   ) AS rn
+            FROM base
+        )
+        SELECT ticker, event_date, delist_type
+        FROM ranked
+        WHERE rn = 1
         """
     )
 
