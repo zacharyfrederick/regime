@@ -120,59 +120,50 @@ def main() -> None:
         log.info("Wrote empty %s", MACRO_FEATURES_PATH)
         return
 
-    # Register single-vintage parquets as views (date + one value column named by stem). PIT parquets are handled via pit_dfs.
+    # Register single-vintage parquets as views (date + one value column named by stem). PIT parquets become pit_{stem} views via ASOF SQL above.
     for stem, path in stems_single:
         con.execute(f"CREATE OR REPLACE VIEW fred_{stem} AS SELECT * FROM read_parquet({path_sql(path)})")
 
-    # raw_base: dates LEFT JOIN each FRED series (sparse for monthly series)
-    # Build (date, value) per PIT stem: for each sim date D, effective_vintage = max(vintage_date <= D), ffill that vintage to daily, value at D
-    pit_dfs: dict[str, pd.DataFrame] = {}
-    if stems_pit:
-        dates_df = con.execute("SELECT date FROM dates ORDER BY date").df()
-        sim_dates = pd.to_datetime(dates_df["date"]).dt.date.tolist()
-        for stem, path in stems_pit:
-            pit = pd.read_parquet(path)
-            if pit.empty or "vintage_date" not in pit.columns:
-                pit_dfs[stem] = pd.DataFrame({"date": sim_dates, stem: [None] * len(sim_dates)})
-                continue
-            pit["observation_date"] = pd.to_datetime(pit["observation_date"]).dt.date
-            pit["vintage_date"] = pd.to_datetime(pit["vintage_date"]).dt.date
-            vintage_dates = sorted(pit["vintage_date"].unique())
-            row_list = []
-            for d in sim_dates:
-                v_leq = [v for v in vintage_dates if v <= d]
-                if not v_leq:
-                    row_list.append({"date": d, stem: None})
-                    continue
-                eff_v = max(v_leq)
-                sub = pit.loc[pit["vintage_date"] == eff_v, ["observation_date", "value"]].drop_duplicates(subset=["observation_date"], keep="last").sort_values("observation_date")
-                if sub.empty:
-                    row_list.append({"date": d, stem: None})
-                    continue
-                sub = sub.set_index("observation_date")
-                sub.index = pd.to_datetime(sub.index)
-                day_range = pd.date_range(sub.index.min(), pd.Timestamp(d), freq="D")
-                sub = sub.reindex(day_range).ffill()
-                if len(sub) == 0:
-                    row_list.append({"date": d, stem: None})
-                    continue
-                # Value at sim date d = last forward-filled value up to d
-                sub_trunc = sub.loc[sub.index <= pd.Timestamp(d)]
-                val = sub_trunc.iloc[-1].iloc[0] if len(sub_trunc) else None
-                row_list.append({"date": d, stem: float(val) if pd.notna(val) else None})
-            pit_dfs[stem] = pd.DataFrame(row_list)
+    # PIT stems: resolve in DuckDB with ASOF (effective vintage per sim date, then effective observation); one view per stem
+    for stem, path in stems_pit:
+        con.execute(f"""
+            CREATE OR REPLACE VIEW pit_raw_{stem} AS
+            SELECT observation_date, vintage_date, value
+            FROM read_parquet({path_sql(path)})
+        """)
+        con.execute(f"""
+            CREATE OR REPLACE VIEW pit_{stem} AS
+            WITH effective_vintage AS (
+                SELECT d.date AS sim_date, MAX(p.vintage_date) AS eff_vintage
+                FROM dates d
+                JOIN pit_raw_{stem} p ON p.vintage_date <= d.date
+                GROUP BY d.date
+            ),
+            effective_obs AS (
+                SELECT ev.sim_date, ev.eff_vintage, MAX(p.observation_date) AS eff_obs
+                FROM effective_vintage ev
+                JOIN pit_raw_{stem} p ON p.vintage_date = ev.eff_vintage
+                    AND p.observation_date <= ev.sim_date
+                GROUP BY ev.sim_date, ev.eff_vintage
+            ),
+            resolved AS (
+                SELECT eo.sim_date AS date, MAX(p.value) AS {stem}
+                FROM effective_obs eo
+                JOIN pit_raw_{stem} p ON p.vintage_date = eo.eff_vintage
+                    AND p.observation_date = eo.eff_obs
+                GROUP BY eo.sim_date
+            )
+            SELECT d.date, r.{stem}
+            FROM dates d
+            LEFT JOIN resolved r ON r.date = d.date
+        """)
 
-    # Join clauses: single-vintage (fred_{stem} on date), then PIT (pit_dfs)
-    join_parts = []
-    for stem, _ in stems_single:
-        join_parts.append(f"LEFT JOIN fred_{stem} {stem} ON {stem}.date = d.date")
-    for stem in pit_dfs:
-        join_parts.append(f"LEFT JOIN pit_{stem} {stem} ON {stem}.date = d.date")
-    select_parts = [f"{stem}.{stem} AS {stem}" for stem, _ in stems_single] + [f"{stem}.{stem} AS {stem}" for stem in pit_dfs]
+    # Join clauses: single-vintage (fred_{stem} on date), then PIT (pit_{stem} views)
+    pit_stems = [s for s, _ in stems_pit]
+    join_parts = [f"LEFT JOIN fred_{stem} {stem} ON {stem}.date = d.date" for stem, _ in stems_single]
+    join_parts += [f"LEFT JOIN pit_{stem} {stem} ON {stem}.date = d.date" for stem in pit_stems]
+    select_parts = [f"{stem}.{stem} AS {stem}" for stem, _ in stems_single] + [f"{stem}.{stem} AS {stem}" for stem in pit_stems]
     from_clause = " FROM dates d " + " ".join(join_parts)
-
-    for stem, df in pit_dfs.items():
-        con.register(f"pit_{stem}", df)
 
     con.execute(f"""
         CREATE OR REPLACE VIEW raw_base AS
@@ -191,7 +182,7 @@ def main() -> None:
         FROM raw_base r
     """)
 
-    # base2: add vix_change_20d (LAG 20), cpi_yoy (LAG 365 for YoY, in percent)
+    # base2: add vix_change_20d (LAG 20 rows), cpi_yoy (LAG 252 rows ≈ 1y on trading-day grid, in percent)
     has_vix = "vix" in stems_list
     has_cpi = "cpi" in stems_list
     has_treasury = "treasury_10y" in stems_list
@@ -202,10 +193,8 @@ def main() -> None:
     else:
         derived.append("CAST(NULL AS DOUBLE) AS vix_change_20d")
     if has_cpi:
-        # cpi_yoy: LAG 365 days on forward-filled daily CPI
-        # Approximate YoY — 365 calendar days back, not exact 12-month period
-        # Sufficient for macro regime signal; not for official inflation reporting
-        derived.append("(base.cpi - LAG(base.cpi, 365) OVER (ORDER BY base.date)) / NULLIF(LAG(base.cpi, 365) OVER (ORDER BY base.date), 0) * 100 AS cpi_yoy")
+        # cpi_yoy: LAG 252 rows = ~1 year on trading-day grid (consistent with VIX 20d and SPY 12m)
+        derived.append("(base.cpi - LAG(base.cpi, 252) OVER (ORDER BY base.date)) / NULLIF(LAG(base.cpi, 252) OVER (ORDER BY base.date), 0) * 100 AS cpi_yoy")
     else:
         derived.append("CAST(NULL AS DOUBLE) AS cpi_yoy")
 
@@ -269,7 +258,6 @@ def main() -> None:
         CREATE OR REPLACE VIEW macro_features AS
         SELECT {', '.join(final_cols)}
         {macro_from}
-        ORDER BY m.date
     """)
     con.execute(f"COPY (SELECT * FROM macro_features) TO {path_sql(MACRO_FEATURES_PATH)} (FORMAT PARQUET)")
     log.info("Wrote %s", MACRO_FEATURES_PATH)
