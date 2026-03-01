@@ -1,30 +1,6 @@
 #!/usr/bin/env python3
 """
 Experiment 0004: PCF Decile Sort + Quality Filter
-
-The core strategy validated across 15+ experiments. Quality filter removes
-value traps; PCF decile sort identifies fair-priced quality businesses.
-Q6-Q7 consistently produces the best risk-adjusted returns (Sharpe ~1.0,
-MaxDD ~-20%) across split samples, quality thresholds, and VIX regimes.
-
-Methodology:
-- Monthly rebalance (last trading day of each month)
-- Top 1500 by market cap on rebalance date
-- Quality filter: fcf_r2_10y > 0.5 AND fcf_pct_positive >= 0.5
-  (robust across NCFO/FCF and thresholds 0.5-0.7)
-- Exclude Financial Services and Real Estate (PB/PCF distorted)
-- Sort survivors into deciles by pcf_pit (ascending — D1 = cheapest, D10 = most expensive)
-- Equal weight within decile
-- 21 trading day forward returns (fwd_ret_21td)
-- Post-2010 (avoids GFC regime, cleaner signal)
-
-Key findings:
-- Q6-Q7: Sharpe ~1.0-1.3, MaxDD ~-20%, CAGR ~15-17%
-- Q4 beats Q1 on Sharpe in both split-sample halves
-- Quality filter is the edge; valuation ranking within quality is secondary
-- Signal amplified when VIX >= 15 but optimal decile doesn't shift
-
-Output: experiments/runs/0004_pcf_quality_quintile/
 """
 import sys
 from pathlib import Path
@@ -57,7 +33,7 @@ FCF_PCT_POSITIVE_MIN = 0.5
 EXCLUDE_SECTORS = ("Financial Services", "Real Estate")
 
 # Date filter
-DATE_START = "2010-01-01"
+DATE_START = "2000-01-01"
 
 OUTPUT_DIR = ROOT / "experiments" / "runs" / EXPERIMENT_ID
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -109,6 +85,7 @@ def main():
                 m.sector,
                 m.fcf_r2_10y,
                 m.fcf_pct_positive,
+                 m.vix,
                 ROW_NUMBER() OVER (PARTITION BY m.date ORDER BY m.marketcap_daily DESC) AS mktcap_rank
             FROM read_parquet({master_path}) m
             INNER JOIN month_end_dates d ON m.date = d.rebal_date
@@ -119,6 +96,7 @@ def main():
               AND m.{HORIZON} IS NOT NULL
               AND m.date >= '{DATE_START}'
               AND m.sector NOT IN ({exclude_list})
+              and (m.vix >= 13 and m.vix < 35)
         ),
         top_n AS (
             SELECT *,
@@ -186,6 +164,13 @@ def main():
         ts['Q4_Q5_spread'] = ts['Q4'] - ts[f'Q{N_DECILES}']
     ts = ts.sort_index()
 
+    # Reindex to full calendar month-ends: missing months = 0.0 return (cash). Ensures
+    # CAGR, Sharpe, and drawdowns use the real calendar timeline, not just active months.
+    ts.index = pd.to_datetime(ts.index).to_period("M").to_timestamp("M")
+    ts = ts[~ts.index.duplicated(keep="first")]
+    all_month_ends = pd.date_range(ts.index.min(), ts.index.max(), freq="ME")
+    ts = ts.reindex(all_month_ends, fill_value=0.0)
+
     # -------------------------------------------------------------------
     # Cumulative returns
     # -------------------------------------------------------------------
@@ -202,6 +187,24 @@ def main():
         total_ret = cumulative[col].iloc[-1] - 1
         cagr = (1 + total_ret) ** (1 / n_years) - 1 if n_years > 0 else 0
         print(f"  {col}: {total_ret:+.2%} total, {cagr:+.2%} CAGR")
+
+    # -------------------------------------------------------------------
+    # Chained monthly returns: Q4 (annual compound return by year)
+    # -------------------------------------------------------------------
+    print("\n" + "=" * 70)
+    print("CHAINED MONTHLY RETURNS: Q4 (by year)")
+    print("=" * 70)
+    ts_with_year = ts.copy()
+    ts_with_year["year"] = pd.to_datetime(ts_with_year.index).year
+    q4_annual = ts_with_year.groupby("year")["Q4"].apply(lambda x: (1 + x).prod() - 1)
+    cum_q4 = cumulative["Q4"]
+    for year in q4_annual.index:
+        y_ret = q4_annual.loc[year]
+        year_end = pd.Timestamp(year=year, month=12, day=31)
+        idx_on_or_before = cum_q4.index[cum_q4.index <= year_end]
+        cum_to_date = (cum_q4.loc[idx_on_or_before[-1]] - 1) if len(idx_on_or_before) > 0 else 0.0
+        print(f"  {year}: {y_ret:+.2%} (cumulative to year-end: {cum_to_date:+.2%})")
+    print(f"  Full period chained: {cum_q4.iloc[-1] - 1:+.2%}")
 
     # -------------------------------------------------------------------
     # Risk metrics
@@ -378,6 +381,13 @@ def main():
         print(f"  {f.name}")
 
     con.close()
+
+    # Generate descriptive report (report.md + figures) and full analysis (turnover, split-sample, etc.)
+    sys.path.insert(0, str(ROOT / "experiments"))
+    import describe_backtest
+    import analyze_backtest
+    describe_backtest.run_report(OUTPUT_DIR)
+    analyze_backtest.run_analysis(OUTPUT_DIR)
 
 
 if __name__ == "__main__":
