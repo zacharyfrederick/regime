@@ -9,6 +9,9 @@ decoupled from in_universe filter). Terminal price = last SEP closeadj for all e
 types. mergerfrom is excluded from fwd_delisted flag and from triggering terminal
 logic (informational only).
 
+Monthly horizon uses end-of-month rebalance: entry = last trading day of month,
+exit = last trading day of next month (one-month holding period).
+
 Consumes: universe (daily_universe.parquet), SEP, ACTIONS.
 Run after 01_universe. Output: FORWARD_LABELS_PATH.
 """
@@ -218,14 +221,23 @@ def main() -> None:
         GROUP BY iso_year, iso_week
         """
     )
+    # Monthly: end-of-month rebalance — entry = last trading day of month, exit = last trading day of next month
     con.execute(
         """
         CREATE OR REPLACE TABLE rebalance_monthly AS
-        SELECT year, month,
-               MIN(date) AS entry_date,
-               MAX(date) AS exit_date
-        FROM trading_calendar
-        GROUP BY year, month
+        WITH month_ends AS (
+            SELECT year, month, MAX(date) AS entry_date
+            FROM trading_calendar
+            GROUP BY year, month
+        ),
+        with_next AS (
+            SELECT year, month, entry_date,
+                   LEAD(entry_date) OVER (ORDER BY year, month) AS exit_date
+            FROM month_ends
+        )
+        SELECT year, month, entry_date, exit_date
+        FROM with_next
+        WHERE exit_date IS NOT NULL
         """
     )
     con.execute(
