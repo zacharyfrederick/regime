@@ -228,12 +228,16 @@ def compute_quality_metrics_for_ticker(
     Accepts DataFrame or list[dict] (from rebuild_annual_from_quarters) to avoid DataFrame overhead in inner loop.
     """
     out: dict[str, Any] = {
+        "ncfo_r2_5y": None,
         "ncfo_r2_10y": None,
+        "ncfo_cagr_5y": None,
         "ncfo_cagr_10y": None,
         "ncfo_pct_positive": None,
         "ncfo_r2_adjusted": None,
-        "fcf_cagr_5y": None,
+        "fcf_r2_5y": None,
         "fcf_r2_10y": None,
+        "fcf_cagr_5y": None,
+        "fcf_cagr_10y": None,
         "fcf_pct_positive": None,
         "fcf_r2_adjusted": None,
         "fcf_ncfo_r2_delta": None,
@@ -253,23 +257,34 @@ def compute_quality_metrics_for_ticker(
     annual_df = annual_df.sort_values("fiscal_year")
     ncfo_col = "ncfo_annual" if "ncfo_annual" in annual_df.columns else "ncfo"
     if ncfo_col in annual_df.columns:
+        ncfo_5 = annual_df[ncfo_col].tail(5)
         ncfo_10 = annual_df[ncfo_col].tail(10)
-        r2, cagr, pct_pos = ncfo_r2_cagr(ncfo_10)
-        out["ncfo_r2_10y"] = r2
-        out["ncfo_cagr_10y"] = cagr
+        ncfo_6 = annual_df[ncfo_col].tail(6)
+        ncfo_11 = annual_df[ncfo_col].tail(11)
+        r2_5, _ = r2_and_pct_positive(ncfo_5, min_points=MIN_YEARS_FCF)
+        r2_10, pct_pos = r2_and_pct_positive(ncfo_10, min_points=MIN_YEARS_FCF)
+        out["ncfo_r2_5y"] = r2_5
+        out["ncfo_r2_10y"] = r2_10
         out["ncfo_pct_positive"] = pct_pos
-        out["ncfo_r2_adjusted"] = (r2 * pct_pos) if (r2 is not None and pct_pos is not None) else None
+        out["ncfo_r2_adjusted"] = (r2_10 * pct_pos) if (r2_10 is not None and pct_pos is not None) else None
+        out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if len(ncfo_6.dropna()) >= 6 else None
+        out["ncfo_cagr_10y"] = fcf_cagr(ncfo_11) if len(ncfo_11.dropna()) >= 11 else None
 
     fcf_recon_col = "fcf_recon_annual" if "fcf_recon_annual" in annual_df.columns else None
     fcf_col = fcf_recon_col or ("fcf_annual" if "fcf_annual" in annual_df.columns else "fcf")
     if fcf_col in annual_df.columns:
-        fcf_5y = annual_df[fcf_col].tail(5)
-        out["fcf_cagr_5y"] = fcf_cagr(fcf_5y)
-        fcf_10y = annual_df[fcf_col].tail(10)
-        fcf_r2, fcf_pct = r2_and_pct_positive(fcf_10y, min_points=MIN_YEARS_FCF)
-        out["fcf_r2_10y"] = fcf_r2
+        fcf_5 = annual_df[fcf_col].tail(5)
+        fcf_10 = annual_df[fcf_col].tail(10)
+        fcf_6 = annual_df[fcf_col].tail(6)
+        fcf_11 = annual_df[fcf_col].tail(11)
+        fcf_r2_5, _ = r2_and_pct_positive(fcf_5, min_points=MIN_YEARS_FCF)
+        fcf_r2_10, fcf_pct = r2_and_pct_positive(fcf_10, min_points=MIN_YEARS_FCF)
+        out["fcf_r2_5y"] = fcf_r2_5
+        out["fcf_r2_10y"] = fcf_r2_10
         out["fcf_pct_positive"] = fcf_pct
-        out["fcf_r2_adjusted"] = (fcf_r2 * fcf_pct) if (fcf_r2 is not None and fcf_pct is not None) else None
+        out["fcf_r2_adjusted"] = (fcf_r2_10 * fcf_pct) if (fcf_r2_10 is not None and fcf_pct is not None) else None
+        out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if len(fcf_6.dropna()) >= 6 else None
+        out["fcf_cagr_10y"] = fcf_cagr(fcf_11) if len(fcf_11.dropna()) >= 11 else None
         ncfo_adj = out.get("ncfo_r2_adjusted")
         fcf_adj = out["fcf_r2_adjusted"]
         if ncfo_adj is not None and fcf_adj is not None:
@@ -314,21 +329,32 @@ def _compute_quality_metrics_from_dicts(
         )
 
     if "ncfo_annual" in annual_sorted[0]:
+        ncfo_5 = _arr("ncfo_annual", 5)
         ncfo_10 = _arr("ncfo_annual", 10)
-        r2, cagr, pct_pos = ncfo_r2_cagr(ncfo_10)
-        out["ncfo_r2_10y"] = r2
-        out["ncfo_cagr_10y"] = cagr
+        ncfo_6 = _arr("ncfo_annual", 6)
+        ncfo_11 = _arr("ncfo_annual", 11)
+        r2_5, _ = r2_and_pct_positive(ncfo_5, min_points=MIN_YEARS_FCF)
+        r2_10, pct_pos = r2_and_pct_positive(ncfo_10, min_points=MIN_YEARS_FCF)
+        out["ncfo_r2_5y"] = r2_5
+        out["ncfo_r2_10y"] = r2_10
         out["ncfo_pct_positive"] = pct_pos
-        out["ncfo_r2_adjusted"] = (r2 * pct_pos) if (r2 is not None and pct_pos is not None) else None
+        out["ncfo_r2_adjusted"] = (r2_10 * pct_pos) if (r2_10 is not None and pct_pos is not None) else None
+        out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if np.sum(~np.isnan(ncfo_6)) >= 6 else None
+        out["ncfo_cagr_10y"] = fcf_cagr(ncfo_11) if np.sum(~np.isnan(ncfo_11)) >= 11 else None
 
     if "fcf_recon_annual" in annual_sorted[0]:
         fcf_5 = _arr("fcf_recon_annual", 5)
-        out["fcf_cagr_5y"] = fcf_cagr(fcf_5)
         fcf_10 = _arr("fcf_recon_annual", 10)
-        fcf_r2, fcf_pct = r2_and_pct_positive(fcf_10, min_points=MIN_YEARS_FCF)
-        out["fcf_r2_10y"] = fcf_r2
+        fcf_6 = _arr("fcf_recon_annual", 6)
+        fcf_11 = _arr("fcf_recon_annual", 11)
+        fcf_r2_5, _ = r2_and_pct_positive(fcf_5, min_points=MIN_YEARS_FCF)
+        fcf_r2_10, fcf_pct = r2_and_pct_positive(fcf_10, min_points=MIN_YEARS_FCF)
+        out["fcf_r2_5y"] = fcf_r2_5
+        out["fcf_r2_10y"] = fcf_r2_10
         out["fcf_pct_positive"] = fcf_pct
-        out["fcf_r2_adjusted"] = (fcf_r2 * fcf_pct) if (fcf_r2 is not None and fcf_pct is not None) else None
+        out["fcf_r2_adjusted"] = (fcf_r2_10 * fcf_pct) if (fcf_r2_10 is not None and fcf_pct is not None) else None
+        out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if np.sum(~np.isnan(fcf_6)) >= 6 else None
+        out["fcf_cagr_10y"] = fcf_cagr(fcf_11) if np.sum(~np.isnan(fcf_11)) >= 11 else None
         ncfo_adj = out.get("ncfo_r2_adjusted")
         fcf_adj = out["fcf_r2_adjusted"]
         out["fcf_ncfo_r2_delta"] = round(ncfo_adj - fcf_adj, 4) if (ncfo_adj is not None and fcf_adj is not None) else None
@@ -501,12 +527,16 @@ def compute_quality_metrics_table(
                 rows.append({
                     "ticker": ticker,
                     "datekey": vintage,
-                    "ncfo_r2_10y": metrics["ncfo_r2_10y"],
-                    "ncfo_cagr_10y": metrics["ncfo_cagr_10y"],
+                    "ncfo_r2_5y": metrics.get("ncfo_r2_5y"),
+                    "ncfo_r2_10y": metrics.get("ncfo_r2_10y"),
+                    "ncfo_cagr_5y": metrics.get("ncfo_cagr_5y"),
+                    "ncfo_cagr_10y": metrics.get("ncfo_cagr_10y"),
                     "ncfo_pct_positive": metrics.get("ncfo_pct_positive"),
                     "ncfo_r2_adjusted": metrics.get("ncfo_r2_adjusted"),
-                    "fcf_cagr_5y": metrics["fcf_cagr_5y"],
+                    "fcf_r2_5y": metrics.get("fcf_r2_5y"),
                     "fcf_r2_10y": metrics.get("fcf_r2_10y"),
+                    "fcf_cagr_5y": metrics.get("fcf_cagr_5y"),
+                    "fcf_cagr_10y": metrics.get("fcf_cagr_10y"),
                     "fcf_pct_positive": metrics.get("fcf_pct_positive"),
                     "fcf_r2_adjusted": metrics.get("fcf_r2_adjusted"),
                     "fcf_ncfo_r2_delta": metrics.get("fcf_ncfo_r2_delta"),
@@ -538,3 +568,27 @@ def validate_quality_sanity(
     if not ge_recent.empty:
         print(f"GE 2019+ ncfo_r2_adjusted (first): {ge_recent['ncfo_r2_adjusted'].dropna().head(1).values}")
     assert aapl.median() > ge.median(), "AAPL should rank higher quality than GE"
+
+
+if __name__ == "__main__":
+    # Quick sanity check: new 5y/10y R² and CAGR columns (no DuckDB)
+    np.random.seed(42)
+    # 12 years of growing NCFO/FCF so we have 6+ and 11+ for CAGR
+    years = list(range(2012, 2024))
+    ncfo = np.exp(np.linspace(0, 1.5, 12)) * 1e6 + 100
+    fcf = np.exp(np.linspace(0, 1.2, 12)) * 0.8e6 + 50
+    annual_df = pd.DataFrame({
+        "fiscal_year": years,
+        "ncfo_annual": ncfo,
+        "fcf_recon_annual": fcf,
+        "roic_avg": [0.12] * 12,
+        "sharesbas_annual": [1e9] * 12,
+    })
+    out = compute_quality_metrics_for_ticker(annual_df)
+    required = ["ncfo_r2_5y", "ncfo_r2_10y", "ncfo_cagr_5y", "ncfo_cagr_10y", "fcf_r2_5y", "fcf_r2_10y", "fcf_cagr_5y", "fcf_cagr_10y"]
+    for k in required:
+        assert k in out, f"missing key {k}"
+    assert out["ncfo_cagr_5y"] is not None, "ncfo_cagr_5y should be set with 6+ values"
+    assert out["ncfo_cagr_10y"] is not None, "ncfo_cagr_10y should be set with 11+ values"
+    assert out["fcf_cagr_10y"] is not None, "fcf_cagr_10y should be set with 11+ values"
+    print("OK: fundamental_quality 5y/10y R² and CAGR (6/11 values) computed correctly")
