@@ -267,8 +267,10 @@ def compute_quality_metrics_for_ticker(
         out["ncfo_r2_10y"] = r2_10
         out["ncfo_pct_positive"] = pct_pos
         out["ncfo_r2_adjusted"] = (r2_10 * pct_pos) if (r2_10 is not None and pct_pos is not None) else None
-        out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if len(ncfo_6.dropna()) >= 6 else None
-        out["ncfo_cagr_10y"] = fcf_cagr(ncfo_11) if len(ncfo_11.dropna()) >= 11 else None
+        n_ncfo_6 = int(ncfo_6.notna().sum())
+        n_ncfo_11 = int(ncfo_11.notna().sum())
+        out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if n_ncfo_6 >= 6 else None
+        out["ncfo_cagr_10y"] = fcf_cagr(ncfo_11) if n_ncfo_11 >= 11 else None
 
     fcf_recon_col = "fcf_recon_annual" if "fcf_recon_annual" in annual_df.columns else None
     fcf_col = fcf_recon_col or ("fcf_annual" if "fcf_annual" in annual_df.columns else "fcf")
@@ -283,8 +285,10 @@ def compute_quality_metrics_for_ticker(
         out["fcf_r2_10y"] = fcf_r2_10
         out["fcf_pct_positive"] = fcf_pct
         out["fcf_r2_adjusted"] = (fcf_r2_10 * fcf_pct) if (fcf_r2_10 is not None and fcf_pct is not None) else None
-        out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if len(fcf_6.dropna()) >= 6 else None
-        out["fcf_cagr_10y"] = fcf_cagr(fcf_11) if len(fcf_11.dropna()) >= 11 else None
+        n_fcf_6 = int(fcf_6.notna().sum())
+        n_fcf_11 = int(fcf_11.notna().sum())
+        out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if n_fcf_6 >= 6 else None
+        out["fcf_cagr_10y"] = fcf_cagr(fcf_11) if n_fcf_11 >= 11 else None
         ncfo_adj = out.get("ncfo_r2_adjusted")
         fcf_adj = out["fcf_r2_adjusted"]
         if ncfo_adj is not None and fcf_adj is not None:
@@ -329,32 +333,36 @@ def _compute_quality_metrics_from_dicts(
         )
 
     if "ncfo_annual" in annual_sorted[0]:
-        ncfo_5 = _arr("ncfo_annual", 5)
-        ncfo_10 = _arr("ncfo_annual", 10)
-        ncfo_6 = _arr("ncfo_annual", 6)
         ncfo_11 = _arr("ncfo_annual", 11)
+        ncfo_5 = ncfo_11[-5:]
+        ncfo_10 = ncfo_11[-10:]
+        ncfo_6 = ncfo_11[-6:]
         r2_5, _ = r2_and_pct_positive(ncfo_5, min_points=MIN_YEARS_FCF)
         r2_10, pct_pos = r2_and_pct_positive(ncfo_10, min_points=MIN_YEARS_FCF)
         out["ncfo_r2_5y"] = r2_5
         out["ncfo_r2_10y"] = r2_10
         out["ncfo_pct_positive"] = pct_pos
         out["ncfo_r2_adjusted"] = (r2_10 * pct_pos) if (r2_10 is not None and pct_pos is not None) else None
-        out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if np.sum(~np.isnan(ncfo_6)) >= 6 else None
-        out["ncfo_cagr_10y"] = fcf_cagr(ncfo_11) if np.sum(~np.isnan(ncfo_11)) >= 11 else None
+        n_ncfo_6 = np.count_nonzero(~np.isnan(ncfo_6))
+        n_ncfo_11 = np.count_nonzero(~np.isnan(ncfo_11))
+        out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if n_ncfo_6 >= 6 else None
+        out["ncfo_cagr_10y"] = fcf_cagr(ncfo_11) if n_ncfo_11 >= 11 else None
 
     if "fcf_recon_annual" in annual_sorted[0]:
-        fcf_5 = _arr("fcf_recon_annual", 5)
-        fcf_10 = _arr("fcf_recon_annual", 10)
-        fcf_6 = _arr("fcf_recon_annual", 6)
         fcf_11 = _arr("fcf_recon_annual", 11)
+        fcf_5 = fcf_11[-5:]
+        fcf_10 = fcf_11[-10:]
+        fcf_6 = fcf_11[-6:]
         fcf_r2_5, _ = r2_and_pct_positive(fcf_5, min_points=MIN_YEARS_FCF)
         fcf_r2_10, fcf_pct = r2_and_pct_positive(fcf_10, min_points=MIN_YEARS_FCF)
         out["fcf_r2_5y"] = fcf_r2_5
         out["fcf_r2_10y"] = fcf_r2_10
         out["fcf_pct_positive"] = fcf_pct
         out["fcf_r2_adjusted"] = (fcf_r2_10 * fcf_pct) if (fcf_r2_10 is not None and fcf_pct is not None) else None
-        out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if np.sum(~np.isnan(fcf_6)) >= 6 else None
-        out["fcf_cagr_10y"] = fcf_cagr(fcf_11) if np.sum(~np.isnan(fcf_11)) >= 11 else None
+        n_fcf_6 = np.count_nonzero(~np.isnan(fcf_6))
+        n_fcf_11 = np.count_nonzero(~np.isnan(fcf_11))
+        out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if n_fcf_6 >= 6 else None
+        out["fcf_cagr_10y"] = fcf_cagr(fcf_11) if n_fcf_11 >= 11 else None
         ncfo_adj = out.get("ncfo_r2_adjusted")
         fcf_adj = out["fcf_r2_adjusted"]
         out["fcf_ncfo_r2_delta"] = round(ncfo_adj - fcf_adj, 4) if (ncfo_adj is not None and fcf_adj is not None) else None
