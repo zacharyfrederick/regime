@@ -80,7 +80,8 @@ def main() -> None:
     def register(name: str, path: Path) -> None:
         if path.exists():
             if name == "tickers":
-                # Use tickers_base so DEBUG can replace "tickers" with a filtered copy without self-reference
+                # Use tickers_base so DEBUG can replace "tickers" with a filtered copy without self-reference.
+                # Restrict to common stock: US exchanges, domestic common share classes, USD currency, no ticker with '.' (e.g. BRK.A).
                 con.execute(
                     f"""
                     CREATE OR REPLACE VIEW tickers_base AS
@@ -88,6 +89,10 @@ def main() -> None:
                     WHERE "table" = 'SF1'
                       AND ticker IS NOT NULL
                       AND TRIM(COALESCE(ticker, '')) <> ''
+                      AND exchange IN ('NYSE', 'NASDAQ', 'NYSEMKT')
+                      AND category IN ('Domestic Common Stock Primary Class', 'Domestic Common Stock', 'Domestic Common Stock Secondary Class')
+                      AND ticker NOT LIKE '%.%'
+                      AND UPPER(COALESCE(currency, '')) = 'USD'
                     """
                 )
                 con.execute("CREATE OR REPLACE VIEW tickers AS SELECT * FROM tickers_base")
