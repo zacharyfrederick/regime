@@ -76,7 +76,8 @@ def main() -> None:
             ("ret_3m_vs_sector", pa.float64()), ("vol_vs_sector", pa.float64()), ("ret_3m_rank_sector", pa.float64()),
             ("yield_curve", pa.float64()), ("hy_spread", pa.float64()), ("vix", pa.float64()),
             ("vix_change_20d", pa.float64()), ("nfci", pa.float64()), ("real_rate", pa.float64()),
-            ("spy_regime_ma", pa.float64()), ("spy_ret_12m", pa.float64()),
+            ("spy_regime_ma", pa.float64()),
+            ("spy_ret_1m", pa.float64()), ("spy_ret_3m", pa.float64()), ("spy_ret_6m", pa.float64()), ("spy_ret_12m", pa.float64()),
             ("insider_buy_count_90d", pa.float64()), ("insider_sell_count_90d", pa.float64()),
             ("insider_net_shares_90d", pa.float64()), ("insider_net_ratio_90d", pa.float64()),
             ("insider_officer_buy_90d", pa.float64()),
@@ -154,7 +155,9 @@ def main() -> None:
                CAST(NULL AS DOUBLE) AS yield_curve, CAST(NULL AS DOUBLE) AS hy_spread,
                CAST(NULL AS DOUBLE) AS vix, CAST(NULL AS DOUBLE) AS vix_change_20d,
                CAST(NULL AS DOUBLE) AS nfci, CAST(NULL AS DOUBLE) AS real_rate,
-               CAST(NULL AS DOUBLE) AS spy_regime_ma, CAST(NULL AS DOUBLE) AS spy_ret_12m
+               CAST(NULL AS DOUBLE) AS spy_regime_ma,
+               CAST(NULL AS DOUBLE) AS spy_ret_1m, CAST(NULL AS DOUBLE) AS spy_ret_3m,
+               CAST(NULL AS DOUBLE) AS spy_ret_6m, CAST(NULL AS DOUBLE) AS spy_ret_12m
         FROM universe u WHERE 1=0
     """
     _empty_insider = """
@@ -257,7 +260,7 @@ def main() -> None:
             s.pe_vs_sector, s.pb_vs_sector, s.ps_vs_sector, s.pcf_vs_sector, s.evebitda_vs_sector, s.roic_vs_sector,
             s.ret_3m_vs_sector, s.vol_vs_sector, s.ret_3m_rank_sector,
             m.yield_curve, m.hy_spread, m.vix, m.vix_change_20d, m.nfci, m.real_rate,
-            m.spy_regime_ma, m.spy_ret_12m,
+            m.spy_regime_ma, m.spy_ret_1m, m.spy_ret_3m, m.spy_ret_6m, m.spy_ret_12m,
             i.insider_buy_count_90d, i.insider_sell_count_90d, i.insider_net_shares_90d,
             i.insider_net_ratio_90d, i.insider_officer_buy_90d,
             i.inst_shrholders, i.inst_shrunits, i.inst_shrvalue, i.inst_put_call_ratio,

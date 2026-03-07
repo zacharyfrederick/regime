@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Macro features: FRED series + derived (yield curve, VIX change, real rate, cpi_yoy, etc.) + SPY regime.
+Macro features: FRED series + derived (yield curve, VIX change, real rate, cpi_yoy, etc.) + SPY regime from SFP.
 Expects parquet per series under config.FRED_DIR from 00_fetch_fred (vix.parquet, yield_curve.parquet, etc.).
 Output: outputs/features/macro_features.parquet (date-level only).
 """
@@ -23,6 +23,7 @@ from config import (
     DAILY_UNIVERSE_PATH,
     FRED_DIR,
     MACRO_FEATURES_PATH,
+    SPY_TICKER,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -52,7 +53,9 @@ def main() -> None:
             ("yield_curve", pa.float64()), ("hy_spread", pa.float64()), ("ig_spread", pa.float64()),
             ("vix", pa.float64()), ("vix_change_20d", pa.float64()), ("nfci", pa.float64()),
             ("real_rate", pa.float64()), ("fed_funds", pa.float64()), ("cpi_yoy", pa.float64()),
-            ("spy_regime_ma", pa.float64()), ("spy_ret_12m", pa.float64()),
+            ("spy_regime_ma", pa.float64()),
+            ("spy_ret_1m", pa.float64()), ("spy_ret_3m", pa.float64()),
+            ("spy_ret_6m", pa.float64()), ("spy_ret_12m", pa.float64()),
         ])
         tbl = pa.table({c: pa.array([], type=schema.field(c).type) for c in schema.names})
         pq.write_table(tbl, MACRO_FEATURES_PATH)
@@ -112,7 +115,9 @@ def main() -> None:
                    CAST(NULL AS DOUBLE) AS vix_change_20d, CAST(NULL AS DOUBLE) AS nfci,
                    CAST(NULL AS DOUBLE) AS real_rate, CAST(NULL AS DOUBLE) AS fed_funds,
                    CAST(NULL AS DOUBLE) AS cpi_yoy,
-                   CAST(NULL AS DOUBLE) AS spy_regime_ma, CAST(NULL AS DOUBLE) AS spy_ret_12m
+                   CAST(NULL AS DOUBLE) AS spy_regime_ma,
+                   CAST(NULL AS DOUBLE) AS spy_ret_1m, CAST(NULL AS DOUBLE) AS spy_ret_3m,
+                   CAST(NULL AS DOUBLE) AS spy_ret_6m, CAST(NULL AS DOUBLE) AS spy_ret_12m
             FROM dates d
             ORDER BY d.date
         """)
@@ -217,23 +222,26 @@ def main() -> None:
         FROM base2
     """)
 
-    # SPY regime and 12m return from SEP (if available)
-    sep_path = DATA_DIR / "SEP.parquet"
-    if not sep_path.exists():
-        sep_path = DATA_DIR / "sep.parquet"
-    has_spy = sep_path.exists()
+    # SPY regime and 12m return from SFP (fund/ETF prices only)
+    sfp_path = DATA_DIR / "SFP.parquet"
+    if not sfp_path.exists():
+        sfp_path = DATA_DIR / "sfp.parquet"
+    has_spy = sfp_path.exists()
     if has_spy:
         con.execute(f"""
             CREATE OR REPLACE VIEW spy_raw AS
             WITH spy AS (
                 SELECT date, closeadj,
+                       closeadj / LAG(closeadj, 21)  OVER (ORDER BY date) - 1 AS spy_ret_1m,
+                       closeadj / LAG(closeadj, 63)  OVER (ORDER BY date) - 1 AS spy_ret_3m,
+                       closeadj / LAG(closeadj, 126) OVER (ORDER BY date) - 1 AS spy_ret_6m,
                        closeadj / LAG(closeadj, 252) OVER (ORDER BY date) - 1 AS spy_ret_12m,
                        AVG(closeadj) OVER (ORDER BY date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) AS ma200
-                FROM read_parquet({path_sql(sep_path)})
-                WHERE ticker = 'SPY'
+                FROM read_parquet({path_sql(sfp_path)})
+                WHERE ticker = '{SPY_TICKER}'
             )
             SELECT date,
-                   spy_ret_12m,
+                   spy_ret_1m, spy_ret_3m, spy_ret_6m, spy_ret_12m,
                    CASE WHEN closeadj > ma200 THEN 1.0 ELSE 0.0 END AS spy_regime_ma
             FROM spy
         """)
@@ -251,6 +259,9 @@ def main() -> None:
         "m.fed_funds AS fed_funds" if "fed_funds" in stems_list else "CAST(NULL AS DOUBLE) AS fed_funds",
         "m.cpi_yoy AS cpi_yoy",
         "s.spy_regime_ma AS spy_regime_ma" if has_spy else "CAST(NULL AS DOUBLE) AS spy_regime_ma",
+        "s.spy_ret_1m AS spy_ret_1m" if has_spy else "CAST(NULL AS DOUBLE) AS spy_ret_1m",
+        "s.spy_ret_3m AS spy_ret_3m" if has_spy else "CAST(NULL AS DOUBLE) AS spy_ret_3m",
+        "s.spy_ret_6m AS spy_ret_6m" if has_spy else "CAST(NULL AS DOUBLE) AS spy_ret_6m",
         "s.spy_ret_12m AS spy_ret_12m" if has_spy else "CAST(NULL AS DOUBLE) AS spy_ret_12m",
     ]
     macro_from = "FROM base3 m" + (" LEFT JOIN spy_raw s ON s.date = m.date" if has_spy else "")
