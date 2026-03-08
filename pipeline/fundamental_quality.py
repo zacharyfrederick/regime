@@ -195,6 +195,18 @@ def r2_and_pct_positive(series: Union[pd.Series, np.ndarray], min_points: int = 
     return float(r_squared), pct_positive
 
 
+def r2_arcsinh_and_pct_positive(series: Union[pd.Series, np.ndarray], min_points: int = 3) -> tuple[float | None, float | None]:
+    """R² of arcsinh(series) ~ time and fraction of periods positive. Uses all non-NaN values (no positive-only filter). Returns (r2, pct_positive)."""
+    arr = _as_float1d(series)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < min_points:
+        return None, None
+    pct_positive = float((arr > 0).sum() / len(arr))
+    y = np.arcsinh(arr)
+    _, r_squared = _fast_linregress(y)
+    return float(r_squared), pct_positive
+
+
 def slope_series(series: Union[pd.Series, np.ndarray], min_points: int = 2) -> float | None:
     """Linear regression slope of series (index order). Accepts Series or array."""
     arr = _as_float1d(series)
@@ -241,6 +253,8 @@ def compute_quality_metrics_for_ticker(
         "fcf_pct_positive": None,
         "fcf_r2_adjusted": None,
         "fcf_ncfo_r2_delta": None,
+        "ncfo_r2_adjusted_arcsinh": None,
+        "fcf_r2_adjusted_arcsinh": None,
         "roic_level": None,
         "roic_slope_3y": None,
         "grossmargin_slope": None,
@@ -267,6 +281,8 @@ def compute_quality_metrics_for_ticker(
         out["ncfo_r2_10y"] = r2_10
         out["ncfo_pct_positive"] = pct_pos
         out["ncfo_r2_adjusted"] = (r2_10 * pct_pos) if (r2_10 is not None and pct_pos is not None) else None
+        r2_10_ash, _ = r2_arcsinh_and_pct_positive(ncfo_10, min_points=MIN_YEARS_FCF)
+        out["ncfo_r2_adjusted_arcsinh"] = (r2_10_ash * pct_pos) if (r2_10_ash is not None and pct_pos is not None) else None
         n_ncfo_6 = int(ncfo_6.notna().sum())
         n_ncfo_11 = int(ncfo_11.notna().sum())
         out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if n_ncfo_6 >= 6 else None
@@ -285,6 +301,8 @@ def compute_quality_metrics_for_ticker(
         out["fcf_r2_10y"] = fcf_r2_10
         out["fcf_pct_positive"] = fcf_pct
         out["fcf_r2_adjusted"] = (fcf_r2_10 * fcf_pct) if (fcf_r2_10 is not None and fcf_pct is not None) else None
+        fcf_r2_10_ash, _ = r2_arcsinh_and_pct_positive(fcf_10, min_points=MIN_YEARS_FCF)
+        out["fcf_r2_adjusted_arcsinh"] = (fcf_r2_10_ash * fcf_pct) if (fcf_r2_10_ash is not None and fcf_pct is not None) else None
         n_fcf_6 = int(fcf_6.notna().sum())
         n_fcf_11 = int(fcf_11.notna().sum())
         out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if n_fcf_6 >= 6 else None
@@ -343,6 +361,8 @@ def _compute_quality_metrics_from_dicts(
         out["ncfo_r2_10y"] = r2_10
         out["ncfo_pct_positive"] = pct_pos
         out["ncfo_r2_adjusted"] = (r2_10 * pct_pos) if (r2_10 is not None and pct_pos is not None) else None
+        r2_10_ash, _ = r2_arcsinh_and_pct_positive(ncfo_10, min_points=MIN_YEARS_FCF)
+        out["ncfo_r2_adjusted_arcsinh"] = (r2_10_ash * pct_pos) if (r2_10_ash is not None and pct_pos is not None) else None
         n_ncfo_6 = np.count_nonzero(~np.isnan(ncfo_6))
         n_ncfo_11 = np.count_nonzero(~np.isnan(ncfo_11))
         out["ncfo_cagr_5y"] = fcf_cagr(ncfo_6) if n_ncfo_6 >= 6 else None
@@ -359,6 +379,8 @@ def _compute_quality_metrics_from_dicts(
         out["fcf_r2_10y"] = fcf_r2_10
         out["fcf_pct_positive"] = fcf_pct
         out["fcf_r2_adjusted"] = (fcf_r2_10 * fcf_pct) if (fcf_r2_10 is not None and fcf_pct is not None) else None
+        fcf_r2_10_ash, _ = r2_arcsinh_and_pct_positive(fcf_10, min_points=MIN_YEARS_FCF)
+        out["fcf_r2_adjusted_arcsinh"] = (fcf_r2_10_ash * fcf_pct) if (fcf_r2_10_ash is not None and fcf_pct is not None) else None
         n_fcf_6 = np.count_nonzero(~np.isnan(fcf_6))
         n_fcf_11 = np.count_nonzero(~np.isnan(fcf_11))
         out["fcf_cagr_5y"] = fcf_cagr(fcf_6) if n_fcf_6 >= 6 else None
@@ -548,6 +570,8 @@ def compute_quality_metrics_table(
                     "fcf_pct_positive": metrics.get("fcf_pct_positive"),
                     "fcf_r2_adjusted": metrics.get("fcf_r2_adjusted"),
                     "fcf_ncfo_r2_delta": metrics.get("fcf_ncfo_r2_delta"),
+                    "ncfo_r2_adjusted_arcsinh": metrics.get("ncfo_r2_adjusted_arcsinh"),
+                    "fcf_r2_adjusted_arcsinh": metrics.get("fcf_r2_adjusted_arcsinh"),
                     "roic_level": metrics["roic_level"],
                     "roic_slope_3y": metrics["roic_slope_3y"],
                     "grossmargin_slope": metrics["grossmargin_slope"],
