@@ -1,0 +1,30 @@
+{
+  "experiment_id": "pfcf_monthly",
+  "description": "Dreman-style P/CF quintiles only, top 1500, ex-Fin/RE, monthly rebalance",
+  "strategy": "Dreman-style plain P/CF quintiles, monthly rebalance",
+  "timestamp": "2026-03-01T15:53:23.925177",
+  "n_quintiles": 5,
+  "top_n": 1500,
+  "horizon": "fwd_ret_21td",
+  "periods_per_year": 12,
+  "exclude_sectors": [
+    "Financial Services",
+    "Real Estate"
+  ],
+  "date_start": "2000-01-01",
+  "date_range": "2000-01-03 00:00:00 to 2024-12-02 00:00:00",
+  "n_rebalance_dates": 300,
+  "n_active_months": 300,
+  "n_calendar_months": 300,
+  "total_observations": 450000,
+  "avg_stocks_per_quintile_per_month": 300,
+  "q1_avg_monthly_ret": 0.0102,
+  "q5_avg_monthly_ret": 0.0052,
+  "q1_q5_spread_monthly": 0.005000000000000001,
+  "q1_q5_spread_annualized": 0.06000000000000001,
+  "is_monotonic": true,
+  "q1_beats_q5_pct": 0.6,
+  "q1_q5_spread_sharpe": 0.33739194871739797,
+  "spread_sharpe_2010_2017": -0.05203624696125638,
+  "spread_sharpe_2018_2024": -0.036035549019307715
+}

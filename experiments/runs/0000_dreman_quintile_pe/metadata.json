@@ -1,0 +1,20 @@
+{
+  "experiment_id": "0000_dreman_quintile_pe",
+  "description": "PE quintile sort on top 1500 by market cap, monthly rebalance, no quality filters",
+  "timestamp": "2026-03-02T17:56:58.865020",
+  "n_quintiles": 5,
+  "top_n": 1500,
+  "horizon": "fwd_ret_21td",
+  "date_range": "2000-01-31 00:00:00 to 2024-12-31 00:00:00",
+  "n_rebalance_dates": 300,
+  "total_observations": 450000,
+  "q1_avg_monthly_ret": 0.0036,
+  "q5_avg_monthly_ret": 0.0069,
+  "q1_q5_spread_monthly": -0.0033,
+  "q1_q5_spread_annualized": -0.039599999999999996,
+  "is_monotonic": false,
+  "q1_beats_q5_pct": 0.28,
+  "spread_sharpe": -0.5816920928929993,
+  "spread_sharpe_2010_2017": -0.980123843785585,
+  "spread_sharpe_2018_2024": -0.4445238664062366
+}

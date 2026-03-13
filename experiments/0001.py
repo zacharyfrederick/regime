@@ -89,6 +89,7 @@ def main():
                 m.fwd_delisted_21td AS fwd_delisted,
                 m.marketcap_daily,
                 m.sector,
+                m.grossmargin_slope
                 ROW_NUMBER() OVER (PARTITION BY m.date ORDER BY m.marketcap_daily DESC) AS mktcap_rank
             FROM read_parquet({master_path}) m
             INNER JOIN month_end_dates d ON m.date = d.rebal_date

@@ -1,0 +1,29 @@
+{
+  "experiment_id": "0004_pcf_quality_quintile",
+  "description": "PCF decile sort + quality filter (fcf_r2>0.5, fcf_pct>=0.5), top 1500, ex-Fin/RE, monthly",
+  "timestamp": "2026-03-06T18:55:53.226588",
+  "n_deciles": 5,
+  "top_n": 1500,
+  "horizon": "fwd_ret_21td",
+  "quality_filter": "fcf_r2_10y > 0.7, fcf_pct_positive >= 0.7",
+  "exclude_sectors": [
+    "Financial Services",
+    "Real Estate"
+  ],
+  "date_start": "2009-01-01",
+  "date_range": "2009-01-30 00:00:00 to 2024-12-31 00:00:00",
+  "n_rebalance_dates": 192,
+  "total_observations": 65884,
+  "avg_stocks_per_decile": 68,
+  "q1_avg_monthly_ret": 0.0116,
+  "q5_avg_monthly_ret": 0.0126,
+  "q1_q10_spread_monthly": -0.0010000000000000009,
+  "q1_q10_spread_annualized": -0.01200000000000001,
+  "is_monotonic": false,
+  "q1_beats_q10_pct": 0.375,
+  "q1_q10_spread_sharpe": -0.08941973370861586,
+  "split_sample_q4_sharpe_2010_2017": 1.229619236736666,
+  "split_sample_q4_sharpe_2018_2024": 0.8164327941455539,
+  "split_sample_q1_sharpe_2010_2017": 0.856042022459491,
+  "split_sample_q1_sharpe_2018_2024": 0.5001685934158251
+}
