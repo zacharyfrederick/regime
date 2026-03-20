@@ -199,7 +199,7 @@ def main() -> int:
     df = df.sort_values("score", ascending=False).head(top_n)
 
     for t in df["ticker"]:
-        print(f"{t} {df[df['ticker'] == t]['score'].values[0]}")
+        print(f"{t}")
 
     return 0
 

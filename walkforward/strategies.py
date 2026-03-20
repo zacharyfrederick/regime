@@ -137,10 +137,12 @@ def run_strategy_over_cached_folds(
     periods_per_year: float = 12,
     use_equal_weight: bool = False,
     weight_scheme: str = "equal",
+    signal_inv_vol_signal: str = "rank",
     portfolio_mode: str = "long_only",
 ) -> tuple[pd.DataFrame, pd.Series, float, float, float]:
     """
     Run a strategy over precomputed fold_cache. portfolio_mode: 'long_only' or 'long_short'.
+    signal_inv_vol_signal: for weight_scheme='signal_inv_vol' only ('rank' | 'exponential' | 'zscore').
     Returns (summary_df, all_oos_returns, full_sharpe, max_dd, cagr).
     """
     rows = []
@@ -162,10 +164,12 @@ def run_strategy_over_cached_folds(
                 is_metrics = evaluate_fold(
                     eval_is, is_scores, ret_col=ret_col, top_n=top_n,
                     periods_per_year=periods_per_year, weight_scheme=weight_scheme,
+                    signal_inv_vol_signal=signal_inv_vol_signal,
                 )
                 oos_metrics = evaluate_fold(
                     eval_oos, oos_scores, ret_col=ret_col, top_n=top_n,
                     periods_per_year=periods_per_year, weight_scheme=weight_scheme,
+                    signal_inv_vol_signal=signal_inv_vol_signal,
                 )
                 turnover = compute_turnover(oos_metrics["selected_by_date"])
                 long_turnover = short_turnover = np.nan

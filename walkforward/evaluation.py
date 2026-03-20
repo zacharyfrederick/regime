@@ -8,7 +8,13 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-WeightScheme = Literal["equal", "rank", "exponential", "zscore"]
+WeightScheme = Literal["equal", "rank", "exponential", "zscore", "inv_vol", "signal_inv_vol"]
+
+# Signal type for signal_inv_vol weighting: which score-based component to combine with 1/vol.
+SignalInvVolSignal = Literal["rank", "exponential", "zscore"]
+
+# Column name expected in fold data for inv_vol / signal_inv_vol (point-in-time volatility, e.g. annualized).
+INV_VOL_COL = "vol_21d"
 
 
 def _weights_rank(N: int, rank: np.ndarray) -> np.ndarray:
@@ -39,12 +45,39 @@ def _weights_zscore(score: np.ndarray) -> np.ndarray:
     return w / total if total > 0 else np.full_like(w, 1.0 / len(w))
 
 
+def _weights_inv_vol(sigma: np.ndarray, floor: float = 1e-8) -> np.ndarray:
+    """Inverse volatility: w_i = (1/sigma_i) / sum(1/sigma_j). sigma floored to avoid div by zero."""
+    s = np.asarray(sigma, dtype=float)
+    s = np.where(np.isnan(s) | (s <= 0), floor, s)
+    inv = 1.0 / s
+    total = inv.sum()
+    return inv / total if total > 0 else np.full_like(inv, 1.0 / len(inv))
+
+
+def _weights_signal_inv_vol(
+    signal: np.ndarray,
+    sigma: np.ndarray,
+    floor: float = 1e-8,
+) -> np.ndarray:
+    """w_i ∝ (signal_i * (1/sigma_i)); normalized. sigma floored to avoid div by zero."""
+    sig = np.asarray(signal, dtype=float)
+    sig = np.where(np.isnan(sig) | (sig < 0), 0.0, sig)
+    s = np.asarray(sigma, dtype=float)
+    s = np.where(np.isnan(s) | (s <= 0), floor, s)
+    raw = sig * (1.0 / s)
+    total = raw.sum()
+    return raw / total if total > 0 else np.full_like(raw, 1.0 / len(raw))
+
+
 def _period_returns_weighted(
     d: pd.DataFrame,
     ret_col: str,
     weight_scheme: WeightScheme,
+    signal_inv_vol_signal: SignalInvVolSignal = "rank",
 ) -> pd.Series:
-    """Among selected rows in d, compute weights per (date,) and return weighted period return series."""
+    """Among selected rows in d, compute weights per (date,) and return weighted period return series.
+    signal_inv_vol_signal: used only when weight_scheme='signal_inv_vol' ('rank' | 'exponential' | 'zscore').
+    """
     if weight_scheme == "equal":
         return d.groupby("date").apply(
             lambda g: (g[ret_col] * np.ones(len(g)) / len(g)).sum(),
@@ -63,6 +96,29 @@ def _period_returns_weighted(
             w = _weights_exponential(g["pred"].values)
         elif weight_scheme == "zscore":
             w = _weights_zscore(g["pred"].values)
+        elif weight_scheme == "inv_vol":
+            if INV_VOL_COL not in g.columns:
+                w = np.ones(n) / n
+            else:
+                w = _weights_inv_vol(g[INV_VOL_COL].values)
+        elif weight_scheme == "signal_inv_vol":
+            if INV_VOL_COL not in g.columns:
+                w = np.ones(n) / n
+            else:
+                if signal_inv_vol_signal == "rank":
+                    signal = (n - g["rank"].values.astype(float) + 1)
+                elif signal_inv_vol_signal == "exponential":
+                    s = g["pred"].values.astype(float) - np.nanmax(g["pred"].values)
+                    signal = np.exp(np.clip(s, -500, 500))
+                else:
+                    s = g["pred"].values.astype(float)
+                    mu, std = np.nanmean(s), np.nanstd(s)
+                    if std == 0 or np.isnan(std):
+                        signal = np.ones(n)
+                    else:
+                        z = (s - mu) / std
+                        signal = z - np.nanmin(z) + 1e-8
+                w = _weights_signal_inv_vol(signal, g[INV_VOL_COL].values)
         else:
             w = np.ones(n) / n
         out.append((date, float(np.dot(w, rets))))
@@ -76,10 +132,13 @@ def evaluate_fold(
     top_n: int = 50,
     periods_per_year: float = 12,
     weight_scheme: WeightScheme = "equal",
+    signal_inv_vol_signal: SignalInvVolSignal = "rank",
 ):
     """
     Rank by pred within each date; select top top_n names; compute period return by weight_scheme.
-    weight_scheme: 'equal' | 'rank' | 'exponential' | 'zscore'.
+    weight_scheme: 'equal' | 'rank' | 'exponential' | 'zscore' | 'inv_vol' | 'signal_inv_vol'.
+    For 'inv_vol' / 'signal_inv_vol', selected rows must have column INV_VOL_COL (vol_21d); else equal weight.
+    signal_inv_vol_signal: for 'signal_inv_vol' only, which signal to use ('rank' | 'exponential' | 'zscore').
     Returns dict with sharpe, hit_rate, monthly_rets, selected_by_date, etc.
     """
     d = df.copy()
@@ -91,8 +150,12 @@ def evaluate_fold(
     sel = d.loc[d["selected"]]
     if weight_scheme == "equal":
         period_rets = sel.groupby("date")[ret_col].mean().rename("port_ret")
+    elif weight_scheme in ("inv_vol", "signal_inv_vol") and INV_VOL_COL not in sel.columns:
+        period_rets = sel.groupby("date")[ret_col].mean().rename("port_ret")
     else:
-        period_rets = _period_returns_weighted(sel, ret_col, weight_scheme)
+        period_rets = _period_returns_weighted(
+            sel, ret_col, weight_scheme, signal_inv_vol_signal=signal_inv_vol_signal
+        )
     selected_by_date = d.loc[d["selected"]].groupby("date")["ticker"].apply(set).to_dict()
     if period_rets.empty or period_rets.std() == 0:
         sharpe = np.nan

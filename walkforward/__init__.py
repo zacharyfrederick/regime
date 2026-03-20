@@ -1,6 +1,13 @@
 """
 Walk-forward validation module. Re-expose public API.
 """
+from walkforward.daily import (
+    DEFAULT_DAILY_FOLD_PERIODS,
+    DEFAULT_WEEK_FOLD_PERIODS,
+    generate_folds_daily,
+    get_trading_rebal_dates,
+    periods_per_year_for_freq,
+)
 from walkforward.folds import generate_folds, get_rebal_dates
 from walkforward.load import load_fold, load_fold_monthly
 from walkforward.labels import add_target_xs, add_top_bucket_label
@@ -32,6 +39,11 @@ from walkforward.regime import (
 )
 
 __all__ = [
+    "DEFAULT_DAILY_FOLD_PERIODS",
+    "DEFAULT_WEEK_FOLD_PERIODS",
+    "generate_folds_daily",
+    "get_trading_rebal_dates",
+    "periods_per_year_for_freq",
     "get_rebal_dates",
     "generate_folds",
     "load_fold",

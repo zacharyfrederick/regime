@@ -11,6 +11,8 @@ ROOT_DIR = Path(__file__).resolve().parent
 # Raw data: Sharadar parquet files live under DATA_DIR.
 # Expected: TICKERS, ACTIONS, SF1, SF2, SF3, SF3A, SEP, DAILY, METRICS, SP500, etc.
 DATA_DIR = ROOT_DIR / "data"
+# Sharadar TICKERS metadata (optional; experiments may fall back to universe tickers).
+TICKERS_PATH = DATA_DIR / "TICKERS.parquet"
 
 # FRED macro cache (parquet per series). Populate via download script or pipeline.
 FRED_DIR = DATA_DIR / "macro"
@@ -39,8 +41,10 @@ MACRO_FEATURES_PATH = FEATURES_DIR / "macro_features.parquet"
 SECTOR_RELATIVE_PATH = FEATURES_DIR / "sector_relative.parquet"
 INSIDER_INSTITUTIONAL_PATH = FEATURES_DIR / "insider_institutional.parquet"
 MASTER_FEATURES_PATH = MASTER_DIR / "master_features.parquet"
+# P/FCF 3y/5y quantile valuation (built from master by scripts/build_pfcf_quantile_valuation.py)
+PFCF_QUANTILE_VALUATION_PATH = FEATURES_DIR / "pfcf_quantile_valuation.parquet"
 
-# Date range for pipeline (inclusive). Use a subset for development (e.g. 3 years).
+# Date range for pipeline (inclusive). Use a subset for development (e.g. 3 years). Use a subset for development (e.g. 3 years).
 DATE_START = "2000-01-01"
 DATE_END = "2024-12-31"
 
@@ -52,7 +56,7 @@ SPY_TICKER = "SPY"
 VIX_FRED_CODE = "VIXCLS"  # or use ETF proxy from SFP if preferred
 
 # Debug: limit pipeline to a few tickers for fast runs (long-history names).
-DEBUG = True
+DEBUG = False
 DEBUG_TICKERS = None  # When None and DEBUG is True, use DEBUG_TICKERS_DEFAULT.
 DEBUG_TICKERS_DEFAULT = ("AAPL", "MSFT", "JPM", "XOM", "JNJ", "HTZ", "TWX", "MON", "TIF", "DNKN", "ETFC")
 

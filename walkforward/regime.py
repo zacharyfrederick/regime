@@ -148,8 +148,11 @@ def plot_raw_vs_filtered(
     *,
     raw_label: str | None = None,
     filtered_label: str | None = None,
+    oos_rets_spy: pd.Series | None = None,
 ) -> None:
-    """Plot cumulative raw vs filtered returns (for script/notebook display)."""
+    """Plot cumulative raw vs filtered returns (for script/notebook display).
+    If oos_rets_spy is provided, plot SPY cumulative on the same axes for comparison.
+    """
     import matplotlib.pyplot as plt
 
     cum_raw = (1 + oos_rets_raw).cumprod()
@@ -167,6 +170,17 @@ def plot_raw_vs_filtered(
         label=filtered_label or "regime filter",
         alpha=0.8,
     )
+    if oos_rets_spy is not None and len(oos_rets_spy) > 0:
+        cum_spy = (1 + oos_rets_spy).cumprod()
+        plt.plot(
+            cum_spy.index,
+            cum_spy.values,
+            label="SPY",
+            color="black",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.9,
+        )
     plt.xlabel("Date")
     plt.ylabel("Cumulative return")
     plt.title(title)

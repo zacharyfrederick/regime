@@ -74,6 +74,7 @@ feature_cols_core = [c for c in CORE_FEATURES if c in base_feature_cols] + ["sec
 feature_cols_top25 = [c for c in TOP_25_FEATURES if c in base_feature_cols] + ["sector_enc", "famaindustry_enc", "month_of_year"]
 print(f"Full feature count: {len(feature_cols)}; core: {len(feature_cols_core)}; top25: {len(feature_cols_top25)}")
 
+
 # %%
 # Run bucket monotonicity on one fold's OOS (representative)
 MOMENTUM_QUALITY_COMPONENTS = [
@@ -228,6 +229,99 @@ ladder_results.append({
 ladder_df = pd.DataFrame(ladder_results)
 print(ladder_df.sort_values("mean_oos_sharpe", ascending=False))
 
+# %% [markdown]
+# # 21td quality + momentum with regime filter (VIX < 35)
+# 
+# Same strategy for full OOS; sit in cash when VIX >= 35. VIX from SFP.
+
+# %%
+# 21td quality + momentum with regime filter: full OOS, then apply VIX < 35 filter
+score_fn = make_rank_composite_scorer([
+        ("fcf_r2_10y", 0.5),
+         ("fcf_cagr_10y", 0.3),
+         ("ncfo_r2_10y", 0.2),
+     ])
+
+_, oos_rets_raw, sharpe_raw, dd_raw, cagr_raw = run_strategy_over_cached_folds(
+    fold_cache, "fcf_quality_momentum_overlay", score_fn,
+    top_n=50, ret_col="fwd_ret_21td", periods_per_year=PERIODS_PER_YEAR, use_equal_weight=False
+)
+
+sfp_path = config.DATA_DIR / "SFP.parquet"
+filtered = load_vix_and_apply_regime_filter(
+    oos_rets_raw, conn, sfp_path,
+    vix_threshold=35, periods_per_year=PERIODS_PER_YEAR,
+)
+print_regime_backtest("fcf_quality_momentum_overlay", sharpe_raw, dd_raw, cagr_raw, filtered)
+
+# SPY forward returns over same OOS dates for chart comparison
+rebal_dates = oos_rets_raw.index.unique().sort_values()
+rebal_df = pd.DataFrame({
+    "rebal_date": pd.to_datetime(rebal_dates).astype("datetime64[ns]"),
+})
+spy_df = conn.execute(
+    "SELECT date, closeadj FROM read_parquet(?) WHERE ticker = ? ORDER BY date",
+    [str(sfp_path), config.SPY_TICKER],
+).df()
+spy_df["date"] = pd.to_datetime(spy_df["date"]).dt.normalize().astype("datetime64[ns]")
+spy_aligned = pd.merge_asof(
+    rebal_df.sort_values("rebal_date"),
+    spy_df.sort_values("date"),
+    left_on="rebal_date", right_on="date", direction="backward",
+).dropna(subset=["closeadj"]).drop_duplicates("rebal_date")
+spy_px = spy_aligned.set_index("rebal_date")["closeadj"].sort_index()
+spy_fwd = (spy_px.shift(-1) / spy_px - 1).reindex(rebal_dates).dropna()
+oos_rets_spy = spy_fwd.align(oos_rets_raw, join="inner")[0]
+
+plot_raw_vs_filtered(
+    oos_rets_raw, filtered.oos_rets_filtered,
+    "21td quality + momentum: raw vs VIX < 35",
+    raw_label="fcf_quality_momentum_overlay (raw)",
+    filtered_label="fcf_quality_momentum_overlay (regime filter)",
+    oos_rets_spy=oos_rets_spy,
+)
+
+exit()
+# %%
+# fcf_r2_adjusted_arcsinh decile analysis — same OOS as ladder (apples to apples Sharpe)
+# Uses fold_cache OOS panel; rank by factor within each date, assign deciles, then Sharpe per decile.
+FACTOR_COL = "fcf_r2_adjusted_arcsinh"
+oos_panel = pd.concat([fold_data["eval_oos"] for fold_data in fold_cache], ignore_index=True)
+oos_panel = oos_panel.dropna(subset=[FACTOR_COL, "fwd_ret_21td"])
+oos_panel["decile"] = oos_panel.groupby("date")[FACTOR_COL].transform(
+    lambda x: pd.qcut(x.rank(method="first"), 10, labels=np.arange(1, 11), duplicates="drop")
+)
+decile_rets = oos_panel.groupby(["date", "decile"])["fwd_ret_21td"].mean().unstack(level="decile")
+sharpes = {}
+for d in decile_rets.columns:
+    s = decile_rets[d].dropna()
+    if len(s) > 0 and s.std() > 0:
+        sharpes[d] = s.mean() / s.std() * (PERIODS_PER_YEAR ** 0.5)
+    else:
+        sharpes[d] = np.nan
+mean_rets = decile_rets.mean() * PERIODS_PER_YEAR  # annualized mean return per decile
+decile_summary = pd.DataFrame({
+    "decile": list(sharpes.keys()),
+    "ann_mean_ret": [mean_rets.get(d, np.nan) for d in sharpes.keys()],
+    "oos_sharpe": list(sharpes.values()),
+})
+decile_summary = decile_summary.sort_values("decile")
+print(f"OOS period: {decile_rets.index.min()} to {decile_rets.index.max()} ({len(decile_rets)} months) — same as fcf_r2_adjusted_arcsinh ladder.")
+print(decile_summary.to_string(index=False))
+decile_summary
+
+exit()
+# %%
+# Decile cumulative returns (same OOS as above)
+import matplotlib.pyplot as plt
+cum = (1 + decile_rets).cumprod()
+cum.plot(title="fcf_r2_adjusted_arcsinh decile cumulative returns (OOS)", figsize=(10, 5), legend=True)
+plt.ylabel("Cumulative return (1 = 100%)")
+plt.xlabel("Date")
+plt.gca().legend(title="Decile", bbox_to_anchor=(1.02, 1), loc="upper left")
+plt.tight_layout()
+plt.show()
+
 # Diversification test: quality (portfolio long/short) vs momentum (industry-feature composite, long-only); then combo metrics
 # Quality sleeve = long top N by FCF quality, short bottom N (no SPY hedge). Momentum = rank composite of sector-relative features.
 quality_scorer = make_rank_composite_scorer([
@@ -303,52 +397,6 @@ print(f"  quality:         {quality_ann_vol:.2%}")
 print(f"  earnings_qual:  {earnings_ann_vol:.2%}")
 print(f"  insider:        {insider_ann_vol:.2%}")
 
-# Combined returns 1/3 each (filtered); Sharpe, drawdown, CAGR, vol
-combo_rets = (
-    (.45) * aligned["quality"]
-    + (.35) * aligned["earnings_quality"]
-    + (.2) * aligned["insider"]
-).rename("combo")
-combo_sharpe = combo_rets.mean() / combo_rets.std() * (PERIODS_PER_YEAR ** 0.5) if combo_rets.std() > 0 else np.nan
-combo_max_dd, combo_cagr = oos_drawdown_and_cagr(combo_rets, periods_per_year=PERIODS_PER_YEAR)
-combo_ann_vol = _ann_vol(combo_rets)
-print("\nCombined (1/3 quality + 1/3 earnings quality + 1/3 insider, VIX < 35):")
-print(f"  Sharpe:   {combo_sharpe:.3f}")
-print(f"  Ann Vol:  {combo_ann_vol:.2%}")
-print(f"  Max DD:   {combo_max_dd:.2%}")
-print(f"  CAGR:     {combo_cagr:.2%}")
-
-# %% [markdown]
-# # 21td quality + momentum with regime filter (VIX < 35)
-# 
-# Same strategy for full OOS; sit in cash when VIX >= 35. VIX from SFP.
-
-exit()
-# %%
-# 21td quality + momentum with regime filter: full OOS, then apply VIX < 35 filter
-score_fn = make_rank_composite_scorer([
-         ("fcf_r2_10y", 0.7),
-         ("fcf_cagr_10y", 0.3),
-     ])
-
-_, oos_rets_raw, sharpe_raw, dd_raw, cagr_raw = run_strategy_over_cached_folds(
-    fold_cache, "fcf_quality_momentum_overlay", score_fn,
-    top_n=50, ret_col="fwd_ret_21td", periods_per_year=PERIODS_PER_YEAR, use_equal_weight=False
-)
-
-sfp_path = config.DATA_DIR / "SFP.parquet"
-filtered = load_vix_and_apply_regime_filter(
-    oos_rets_raw, conn, sfp_path,
-    vix_threshold=35, periods_per_year=PERIODS_PER_YEAR,
-)
-print_regime_backtest("fcf_quality_momentum_overlay", sharpe_raw, dd_raw, cagr_raw, filtered)
-plot_raw_vs_filtered(
-    oos_rets_raw, filtered.oos_rets_filtered,
-    "21td quality + momentum: raw vs VIX < 35",
-    raw_label="fcf_quality_momentum_overlay (raw)",
-    filtered_label="fcf_quality_momentum_overlay (regime filter)",
-)
-
 # %%
 # Diagnostics: monthly OOS counts (for report); ladder already has per-strategy performance
 counts_list = []
@@ -367,46 +415,6 @@ if diagnostics["pct_months_lte_top_n"] >= 0.8:
         "Most OOS months have universe size <= TOP_N; strategies effectively hold the full universe. "
         "Consider lowering TOP_N (e.g. 20 or 50) for backtest so that selection matters."
     )
-
-
-# %%
-# fcf_r2_adjusted_arcsinh decile analysis — same OOS as ladder (apples to apples Sharpe)
-# Uses fold_cache OOS panel; rank by factor within each date, assign deciles, then Sharpe per decile.
-FACTOR_COL = "fcf_r2_adjusted_arcsinh"
-oos_panel = pd.concat([fold_data["eval_oos"] for fold_data in fold_cache], ignore_index=True)
-oos_panel = oos_panel.dropna(subset=[FACTOR_COL, "fwd_ret_21td"])
-oos_panel["decile"] = oos_panel.groupby("date")[FACTOR_COL].transform(
-    lambda x: pd.qcut(x.rank(method="first"), 10, labels=np.arange(1, 11), duplicates="drop")
-)
-decile_rets = oos_panel.groupby(["date", "decile"])["fwd_ret_21td"].mean().unstack(level="decile")
-sharpes = {}
-for d in decile_rets.columns:
-    s = decile_rets[d].dropna()
-    if len(s) > 0 and s.std() > 0:
-        sharpes[d] = s.mean() / s.std() * (PERIODS_PER_YEAR ** 0.5)
-    else:
-        sharpes[d] = np.nan
-mean_rets = decile_rets.mean() * PERIODS_PER_YEAR  # annualized mean return per decile
-decile_summary = pd.DataFrame({
-    "decile": list(sharpes.keys()),
-    "ann_mean_ret": [mean_rets.get(d, np.nan) for d in sharpes.keys()],
-    "oos_sharpe": list(sharpes.values()),
-})
-decile_summary = decile_summary.sort_values("decile")
-print(f"OOS period: {decile_rets.index.min()} to {decile_rets.index.max()} ({len(decile_rets)} months) — same as fcf_r2_adjusted_arcsinh ladder.")
-print(decile_summary.to_string(index=False))
-decile_summary
-
-# %%
-# Decile cumulative returns (same OOS as above)
-import matplotlib.pyplot as plt
-cum = (1 + decile_rets).cumprod()
-cum.plot(title="fcf_r2_adjusted_arcsinh decile cumulative returns (OOS)", figsize=(10, 5), legend=True)
-plt.ylabel("Cumulative return (1 = 100%)")
-plt.xlabel("Date")
-plt.gca().legend(title="Decile", bbox_to_anchor=(1.02, 1), loc="upper left")
-plt.tight_layout()
-plt.show()
 
 # %% [markdown]
 # # Find best N

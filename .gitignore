@@ -61,3 +61,5 @@ dmypy.json
 *~
 
 .tmp/
+
+**.DS_Store

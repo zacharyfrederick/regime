@@ -11,19 +11,27 @@ def get_rebal_dates(
     parquet_path: str,
     data_start: str,
     freq: str = "month",
+    step: int = 1,
 ) -> list:
     """
-    Get rebalance dates (month-end or week-end) from parquet.
-    Returns list of dates. Caller should register as DataFrame for load_fold, e.g.:
-      conn.register("month_ends", pd.DataFrame({"rebal_date": dates}))
+    Get rebalance dates from parquet.
+
+    - month: last available date per calendar month
+    - week: last available date per ISO week
+    - day: every distinct trading date (panel row date), optionally thinned
+
+    ``step``: if > 1, keep every step-th date from the ordered list (reduces load for freq=day).
+
+    Register for loaders, e.g.:
+      conn.register("rebal_dates", pd.DataFrame({"rebal_date": dates}))
     """
     if freq == "month":
         df = conn.execute(
             """
-            SELECT MAX(date) AS rebal_date
+            SELECT MAX(CAST(date AS DATE)) AS rebal_date
             FROM read_parquet(?)
-            WHERE date >= ?
-            GROUP BY year(date), month(date)
+            WHERE CAST(date AS DATE) >= CAST(? AS DATE)
+            GROUP BY year(CAST(date AS DATE)), month(CAST(date AS DATE))
             ORDER BY rebal_date
             """,
             [parquet_path, data_start],
@@ -31,17 +39,30 @@ def get_rebal_dates(
     elif freq == "week":
         df = conn.execute(
             """
-            SELECT MAX(date) AS rebal_date
+            SELECT MAX(CAST(date AS DATE)) AS rebal_date
             FROM read_parquet(?)
-            WHERE date >= ?
-            GROUP BY year(date), date_part('week', date)
+            WHERE CAST(date AS DATE) >= CAST(? AS DATE)
+            GROUP BY year(CAST(date AS DATE)), date_part('week', CAST(date AS DATE))
+            ORDER BY rebal_date
+            """,
+            [parquet_path, data_start],
+        ).df()
+    elif freq == "day":
+        df = conn.execute(
+            """
+            SELECT DISTINCT CAST(date AS DATE) AS rebal_date
+            FROM read_parquet(?)
+            WHERE CAST(date AS DATE) >= CAST(? AS DATE)
             ORDER BY rebal_date
             """,
             [parquet_path, data_start],
         ).df()
     else:
-        raise ValueError(f"freq must be 'month' or 'week', got {freq!r}")
-    return df["rebal_date"].tolist()
+        raise ValueError(f"freq must be 'month', 'week', or 'day', got {freq!r}")
+    dates = df["rebal_date"].tolist()
+    if step > 1:
+        dates = dates[::step]
+    return dates
 
 
 def generate_folds(
@@ -52,8 +73,13 @@ def generate_folds(
     min_oos_periods: int = 12,
 ):
     """
-    Rolling window folds. Embargo periods are skipped between IS end and OOS start.
-    Skip a fold if its OOS would have fewer than min_oos_periods.
+    Rolling window folds over an ordered rebal calendar.
+
+    ``is_periods`` / ``oos_periods`` / ``embargo_periods`` / ``min_oos_periods`` are counts of
+    **rebalance steps** (month-ends, week-ends, or trading days), depending on how
+    ``rebal_dates`` was built (see ``get_rebal_dates``).
+
+    Embargo: that many rebal steps are skipped between IS end and OOS start.
     Returns list of (is_start, is_end, oos_start, oos_end).
     """
     folds = []
